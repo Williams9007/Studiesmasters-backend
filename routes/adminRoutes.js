@@ -2,7 +2,7 @@ import express from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import Admin from "../models/admin.js";
-import User from "../models/User.js";
+import User from "../models/user.js";
 import Teacher from "../models/teacher.js";
 import Student from "../models/Student.js";
 import QaoUser from "../models/QaoUser.js";
