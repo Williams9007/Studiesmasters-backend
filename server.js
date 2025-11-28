@@ -1,11 +1,17 @@
+// ========================
+//  EduConnect Server
+// ========================
+
 import express from "express";
-import dotenv from "dotenv";
 import cors from "cors";
-import connectDB from "./config/db.js";
+import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
+import connectDB from "./config/db.js";
 
-// Import routes
+// ========================
+//  Import All Routes
+// ========================
 import studentRoutes from "./routes/studentRoutes.js";
 import teacherRoutes from "./routes/teacherRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
@@ -20,31 +26,47 @@ import contactRoutes from "./routes/contactRoutes.js";
 import messageRoutes from "./routes/messageRoutes.js";
 import classRoutes from "./routes/classRoutes.js";
 import teacherClassRoutes from "./routes/teacherClassRoutes.js";
-import pricingRoutes from "./routes/pricingRoutes.js";
+import pricingRoutes from "./routes/pricing.js";
 
-
+// ========================
+//  Setup
+// ========================
 dotenv.config();
-connectDB(); // Connect to MongoDB
+connectDB();
 
 const app = express();
 
-// ==================== Middleware ====================
-// Allow requests from any origin for simplicity
-// You can restrict later if you want
-app.use(cors({
-  origin: true, // allow all origins
-  credentials: true
-}));
+// Render uses ESM → Fix dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
+// ========================
+//  CORS (Allows Your Frontend)
+// ========================
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5173",
+      "https://studiesmasters.com",
+      "https://williams9007.github.io",
+    ],
+    methods: "GET,POST,PUT,DELETE",
+    allowedHeaders: "Content-Type,Authorization",
+  })
+);
+
+// ========================
+//  Middleware
+// ========================
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve uploaded files
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// Serve uploads folder (images, files)
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-// ==================== Routes ====================
+// ========================
+//  Register All Routes
+// ========================
 app.use("/api/students", studentRoutes);
 app.use("/api/teachers", teacherRoutes);
 app.use("/api/payments", paymentRoutes);
@@ -61,15 +83,23 @@ app.use("/api/classes", classRoutes);
 app.use("/api/teacher-classes", teacherClassRoutes);
 app.use("/api/pricing", pricingRoutes);
 
-// Root route
-app.get("/", (req, res) => res.send("EduConnect API is running"));
+// ========================
+//  Health Check
+// ========================
+app.get("/", (req, res) => {
+  res.send("EduConnect API is running successfully 🚀");
+});
 
-// ==================== Error handling middleware ====================
+// ========================
+//  Error Handler
+// ========================
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error("🔥 SERVER ERROR:", err.stack);
   res.status(500).json({ error: err.message });
 });
 
-// ==================== Start server ====================
+// ========================
+//  Start Server
+// ========================
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
