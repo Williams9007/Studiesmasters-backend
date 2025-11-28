@@ -1,0 +1,17 @@
+[
+  {
+    "studentId": "64f8c0e0d123456789abcdef",
+    "studentName": "John Doe",
+    "curriculum": "GES",
+    "package": "GES-EC",
+    "grade": "Basic 4",
+    "subjects": ["Math", "English"],
+    "duration": "3 months",
+    "amount": 2000,
+    "referenceName": "Payment123",
+    "screenshot": "uploads/payment123.jpg",
+    "transactionDate": "2025-11-04T00:00:00.000Z",
+    "status": "confirmed",
+    "reviewedBy": null
+  }
+]
