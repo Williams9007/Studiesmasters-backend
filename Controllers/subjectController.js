@@ -1,29 +1,44 @@
-import Subject from "../models/Subject.js";
+import Subject from "../models/subjectModel.js";
 
-// GET subjects by package & grade (supports case-insensitive matching)
+/**
+ * GET /api/subjects/by-package/:package
+ * Fetch subjects by package and optional grade (case-insensitive)
+ */
 export const getSubjectsByPackage = async (req, res) => {
   try {
-    const { package: pkg } = req.params;
+    const { package: pkg } = req.params; // rename to avoid reserved word
     const { grade } = req.query;
 
     if (!pkg) {
-      return res.status(400).json({ message: "Package is required" });
+      return res.status(400).json({ message: "Package name is required" });
     }
 
-    // Build case-insensitive query
+    // Build query
     const query = {
-      package: { $regex: new RegExp(`^${pkg}$`, "i") }
+      package: { $regex: new RegExp(`^${pkg}$`, "i") },
     };
 
-    if (grade) {
+    if (grade && grade.trim() !== "") {
       query.grade = { $regex: new RegExp(`^${grade}$`, "i") };
     }
 
+    // Fetch subjects
     const subjects = await Subject.find(query);
 
-    return res.status(200).json(subjects);
+    if (!subjects || subjects.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `No subjects found for package "${pkg}"${grade ? ` and grade "${grade}"` : ""}`,
+      });
+    }
+
+    res.status(200).json(subjects);
   } catch (err) {
-    console.error("Error fetching subjects:", err);
-    return res.status(500).json({ message: "Server error" });
+    console.error("Error fetching subjects:", err.message);
+    res.status(500).json({
+      success: false,
+      message: "Server error while fetching subjects",
+      error: err.message,
+    });
   }
 };
