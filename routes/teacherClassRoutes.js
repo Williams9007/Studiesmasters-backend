@@ -1,6 +1,6 @@
 import express from "express";
 import TeacherAssignment from "../models/TeacherAssignment.js";
-import ClassEnrollment from "../models/Classenrollment.js";
+import ClassEnrollment from "../models/ClassEnrollment.js";
 import Teacher from "../models/teacher.js";
 import User from "../models/user.js";
 
