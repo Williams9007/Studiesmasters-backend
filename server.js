@@ -20,7 +20,7 @@ import contactRoutes from "./routes/contactRoutes.js";
 import messageRoutes from "./routes/messageRoutes.js";
 import classRoutes from "./routes/classRoutes.js";
 import teacherClassRoutes from "./routes/teacherClassRoutes.js";
-import pricingRoutes from "./routes/pricingRoutes.js";
+import pricingRoutes from "./routes/pricing.js";
 
 dotenv.config();
 connectDB(); // Connect to MongoDB
@@ -28,17 +28,12 @@ connectDB(); // Connect to MongoDB
 const app = express();
 
 // ==================== Middleware ====================
-// CORS setup for both local dev and production frontend
-app.use(
-  cors({
-    origin: [
-      "http://localhost:5173",        // local dev
-      "https://studiesmasters.com",   // your domain
-      "https://williams9007.github.io" // GH Pages domain
-    ],
-    credentials: true
-  })
-);
+// Allow requests from any origin for simplicity
+// You can restrict later if you want
+app.use(cors({
+  origin: true, // allow all origins
+  credentials: true
+}));
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
