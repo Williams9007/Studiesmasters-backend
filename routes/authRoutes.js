@@ -3,7 +3,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import nodemailer from "nodemailer";
-import User from "../models/User.js";
+import User from "../models/user.js";
 import Student from "../models/Student.js";
 import Admin from "../models/admin.js";
 import Teacher from "../models/teacher.js";
