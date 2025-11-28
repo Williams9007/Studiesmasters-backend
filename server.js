@@ -34,6 +34,7 @@ app.use(
     origin: [
       "http://localhost:5173",        // local dev
       "https://studiesmasters.com"    // your domain
+      "https://williams9007.github.io" // GH Pages domain
     ],
     credentials: true,
   })
