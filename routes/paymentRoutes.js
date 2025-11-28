@@ -2,7 +2,7 @@ import express from "express";
 import multer from "multer";
 import mongoose from "mongoose";
 import Payment from "../models/Payment.js";
-import ClassEnrollment from "../models/Classenrollment.js";
+import ClassEnrollment from "../models/ClassEnrollment.js";
 import Student from "../models/Student.js";
 import Package from "../models/package.js";
 
