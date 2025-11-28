@@ -5,7 +5,7 @@ import connectDB from "./config/db.js";
 import path from "path";
 import { fileURLToPath } from "url";
 
-// Import routes
+// ==================== Routes ====================
 import studentRoutes from "./routes/studentRoutes.js";
 import teacherRoutes from "./routes/teacherRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
@@ -20,26 +20,29 @@ import contactRoutes from "./routes/contactRoutes.js";
 import messageRoutes from "./routes/messageRoutes.js";
 import classRoutes from "./routes/classRoutes.js";
 import teacherClassRoutes from "./routes/teacherClassRoutes.js";
-import pricingRoutes from "./routes/pricingRoutes.js";
+import pricingRoutes from "./routes/pricing.js";
 
 dotenv.config();
+
+// ==================== Database ====================
 connectDB();
 
 const app = express();
 
 // ==================== Middleware ====================
+// CORS: allow requests from your frontend
 const allowedOrigins = [
-  "http://localhost:5173",
-  "https://studiesmasters.com",
-  "https://williams9007.github.io"
+  "http://localhost:5173",                     // local dev
+  "https://studiesmasters-frontend.onrender.com", // live frontend
+  "https://studiesmasters.com",               // production domain
+  "https://williams9007.github.io"            // GH Pages
 ];
 
 app.use(cors({
   origin: function(origin, callback) {
-    if (!origin) return callback(null, true); // for tools like Postman
-    if (allowedOrigins.indexOf(origin) === -1) {
-      const msg = `CORS policy: ${origin} is not allowed`;
-      return callback(new Error(msg), false);
+    if (!origin) return callback(null, true); // allow Postman, mobile apps
+    if (!allowedOrigins.includes(origin)) {
+      return callback(new Error(`CORS policy: ${origin} is not allowed`), false);
     }
     return callback(null, true);
   },
@@ -49,12 +52,12 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ==================== Serve uploaded files ====================
+// ==================== Serve uploads ====================
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-// ==================== Routes ====================
+// ==================== API Routes ====================
 app.use("/api/students", studentRoutes);
 app.use("/api/teachers", teacherRoutes);
 app.use("/api/payments", paymentRoutes);
@@ -71,13 +74,13 @@ app.use("/api/classes", classRoutes);
 app.use("/api/teacher-classes", teacherClassRoutes);
 app.use("/api/pricing", pricingRoutes);
 
-// ==================== Root route ====================
+// ==================== Root ====================
 app.get("/", (req, res) => res.send("EduConnect API is running"));
 
-// ==================== Error handling ====================
+// ==================== Error handler ====================
 app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ error: err.message });
+  console.error("❌ Error:", err.stack);
+  res.status(500).json({ success: false, message: err.message });
 });
 
 // ==================== Start server ====================
