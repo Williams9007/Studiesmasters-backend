@@ -20,7 +20,8 @@ import contactRoutes from "./routes/contactRoutes.js";
 import messageRoutes from "./routes/messageRoutes.js";
 import classRoutes from "./routes/classRoutes.js";
 import teacherClassRoutes from "./routes/teacherClassRoutes.js";
-import pricingRoutes from "./routes/pricing.js";
+import pricingRoutes from "./routes/pricingRoutes.js";
+
 
 dotenv.config();
 connectDB(); // Connect to MongoDB
