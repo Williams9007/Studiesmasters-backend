@@ -1,5 +1,5 @@
 import express from "express";
-import ClassEnrollment from "../models/Classenrollment.js";
+import ClassEnrollment from "../models/ClassEnrollment.js";
 import User from "../models/User.js";
 
 const router = express.Router();
