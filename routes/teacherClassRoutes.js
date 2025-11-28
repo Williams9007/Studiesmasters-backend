@@ -2,7 +2,7 @@ import express from "express";
 import TeacherAssignment from "../models/TeacherAssignment.js";
 import ClassEnrollment from "../models/Classenrollment.js";
 import Teacher from "../models/teacher.js";
-import User from "../models/User.js";
+import User from "../models/user.js";
 
 const router = express.Router();
 
