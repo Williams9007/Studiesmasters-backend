@@ -1,39 +1,29 @@
-import Subject from "../models/subjectModel.js";
+import Subject from "../models/Subject.js";
 
-// GET subjects by package & grade
-export const getSubjectsByPackageGrade = async (req, res) => {
+// GET subjects by package & grade (supports case-insensitive matching)
+export const getSubjectsByPackage = async (req, res) => {
   try {
-    const { packageName, grade } = req.query;
+    const { package: pkg } = req.params;
+    const { grade } = req.query;
 
-    if (!packageName || !grade) {
-      return res.status(400).json({ message: "packageName & grade required" });
+    if (!pkg) {
+      return res.status(400).json({ message: "Package is required" });
     }
 
-    // Fetch subjects matching package + grade
-    const subjects = await Subject.find({ package: packageName, grade });
+    // Build case-insensitive query
+    const query = {
+      package: { $regex: new RegExp(`^${pkg}$`, "i") }
+    };
 
-    // strict rule: max 3 subjects per grade
-    const limitedSubjects = subjects.slice(0, 3);
+    if (grade) {
+      query.grade = { $regex: new RegExp(`^${grade}$`, "i") };
+    }
 
-    // calculate total price
-    const totalPrice = limitedSubjects.reduce((sum, s) => sum + s.price, 0);
+    const subjects = await Subject.find(query);
 
-    // duration rules based on package
-    let duration = 0;
-    if (packageName.includes("SC")) duration = 2; // Example: Special Classes = 2 months
-    else if (packageName.includes("OC")) duration = 1; // One-on-one = 1 month
-    else duration = 1; // Default 1 month for others
-
-    return res.json({
-      packageName,
-      grade,
-      subjects: limitedSubjects,
-      totalSubjects: limitedSubjects.length,
-      duration,
-      totalPrice,
-    });
+    return res.status(200).json(subjects);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Server error" });
+    console.error("Error fetching subjects:", err);
+    return res.status(500).json({ message: "Server error" });
   }
 };
