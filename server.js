@@ -22,16 +22,19 @@ import classRoutes from "./routes/classRoutes.js";
 import teacherClassRoutes from "./routes/teacherClassRoutes.js";
 import pricingRoutes from "./routes/pricingRoutes.js";
 
-
 dotenv.config();
 connectDB(); // Connect to MongoDB
 
 const app = express();
 
 // ==================== Middleware ====================
+// CORS setup for both local dev and production frontend
 app.use(
   cors({
-    origin: "http://localhost:5173",
+    origin: [
+      "http://localhost:5173",        // local dev
+      "https://studiesmasters.com"    // your domain
+    ],
     credentials: true,
   })
 );
@@ -45,8 +48,8 @@ const __dirname = path.dirname(__filename);
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // ==================== Routes ====================
-app.use("/api/students", studentRoutes); // includes /forget-password
-app.use("/api/teachers", teacherRoutes); // includes /forget-password
+app.use("/api/students", studentRoutes);
+app.use("/api/teachers", teacherRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/subjects", subjectRoutes);
 app.use("/api/assignments", assignmentRoutes);
@@ -60,8 +63,6 @@ app.use("/api/messages", messageRoutes);
 app.use("/api/classes", classRoutes);
 app.use("/api/teacher-classes", teacherClassRoutes);
 app.use("/api/pricing", pricingRoutes);
-
-
 
 // Root route
 app.get("/", (req, res) => res.send("EduConnect API is running"));
