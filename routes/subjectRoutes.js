@@ -1,9 +1,8 @@
 import express from "express";
-import { getSubjectsByPackage } from "../controllers/subjectController.js";
+import { getSubjectsByPackage } from "../controllers/SubjectController.js";
 
 const router = express.Router();
 
-// Route to fetch subjects by package and optional grade
 router.get("/by-package/:package", getSubjectsByPackage);
 
 export default router;
