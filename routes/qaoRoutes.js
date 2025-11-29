@@ -20,26 +20,43 @@ const router = express.Router();
 router.post("/access", async (req, res) => {
   const { qaoCode } = req.body;
 
-  if (!qaoCode) return res.status(400).json({ success: false, message: "Access code is required" });
+  if (!qaoCode) 
+    return res.status(400).json({ success: false, message: "Access code is required" });
 
   const validCode = process.env.QAO_SECRET_CODE || "QAO2025_SECRET";
 
-  if (qaoCode === validCode) {
-    let qao = await QaoUser.findOne({ role: "qao" });
+  if (qaoCode !== validCode) 
+    return res.status(401).json({ success: false, message: "Invalid QAO access code" });
+
+  try {
+    // Find existing QAO user by email
+    let qao = await QaoUser.findOne({ email: "qao@example.com" });
+
+    // If not exist, create it
     if (!qao) {
       qao = await QaoUser.create({
         name: "Default QAO",
         email: "qao@example.com",
-        role: "qao"
+        role: "qao",
       });
     }
 
-    const token = jwt.sign({ id: qao._id, role: "qao" }, process.env.JWT_SECRET, { expiresIn: "8h" });
+    const token = jwt.sign(
+      { id: qao._id, role: "qao" },
+      process.env.JWT_SECRET,
+      { expiresIn: "8h" }
+    );
 
-    return res.json({ success: true, message: "QAO access granted", token, user: { id: qao._id, name: qao.name, email: qao.email } });
+    return res.json({
+      success: true,
+      message: "QAO access granted",
+      token,
+      user: { id: qao._id, name: qao.name, email: qao.email, role: qao.role },
+    });
+  } catch (err) {
+    console.error("QAO access creation error:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
   }
-
-  return res.status(401).json({ success: false, message: "Invalid QAO access code" });
 });
 
 // -------------------- Broadcast Messages --------------------
@@ -48,7 +65,8 @@ router.post("/broadcast", verifyQao, async (req, res) => {
     const { recipients, subject, message } = req.body;
     const senderId = req.user._id;
 
-    if (!recipients?.length) return res.status(400).json({ success: false, message: "No recipients provided" });
+    if (!recipients?.length)
+      return res.status(400).json({ success: false, message: "No recipients provided" });
 
     const messages = recipients.map((receiverId) => ({
       sender: senderId,
@@ -123,7 +141,7 @@ router.get("/inbox", verifyQao, async (req, res) => {
 // -------------------- Fetch Users & Teachers --------------------
 router.get("/users", verifyQao, async (req, res) => {
   try {
-    const qaoUsers = await QaoUser.find().select("name email assignedSubjects");
+    const qaoUsers = await QaoUser.find().select("name email assignedSubjects role");
     res.json({ success: true, qaoUsers });
   } catch (err) {
     console.error("QAO fetch users error:", err);
@@ -157,7 +175,11 @@ router.get("/resources", verifyQao, async (req, res) => {
 router.put("/resources/:id", verifyQao, async (req, res) => {
   try {
     const { approved } = req.body;
-    const resource = await Resource.findByIdAndUpdate(req.params.id, { approved }, { new: true });
+    const resource = await Resource.findByIdAndUpdate(
+      req.params.id,
+      { approved },
+      { new: true }
+    );
     res.json({ success: true, resource });
   } catch (err) {
     console.error("Update resource error:", err);
