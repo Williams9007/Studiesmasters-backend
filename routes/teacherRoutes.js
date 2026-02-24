@@ -4,7 +4,7 @@ import crypto from "crypto";
 import nodemailer from "nodemailer";
 import Assignment from "../models/Assignment.js";
 import Teacher from "../models/teacher.js";
-import Student from "../models/student.js";
+import Student from "../models/Student.js";
 
 const router = express.Router();
 // ==================== TEACHER LOGIN ====================
