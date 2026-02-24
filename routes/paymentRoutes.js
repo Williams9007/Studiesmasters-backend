@@ -4,7 +4,7 @@ import mongoose from "mongoose";
 import Payment from "../models/Payment.js";
 import ClassEnrollment from "../models/ClassEnrollment.js";
 import Student from "../models/Student.js";
-import Package from "../models/Package.js";
+import Package from "../models/package.js";
 import { adminAuth } from "../middleware/adminAuth.js";
 
 
