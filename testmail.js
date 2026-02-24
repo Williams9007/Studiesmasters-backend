@@ -1,33 +1,19 @@
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 import dotenv from "dotenv";
 dotenv.config();
 
-async function testEmail() {
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+(async () => {
   try {
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: 465,
-      secure: true,
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
+    const resp = await resend.emails.send({
+      from: "EduConnect Admin <onboarding@resend.dev>",
+      to: process.env.ADMIN_EMAIL,
+      subject: "Test Email",
+      html: "<h1>This is a test</h1><p>If you see this, Resend works.</p>",
     });
-
-    await transporter.verify();
-    console.log("✅ Gmail SMTP ready");
-
-    await transporter.sendMail({
-      from: `"EduConnectt Test" <${process.env.EMAIL_USER}>`,
-      to: process.env.EMAIL_USER,
-      subject: "SMTP Test",
-      text: "This is a test email from EduConnectt backend",
-    });
-
-    console.log("✅ Email sent successfully");
+    console.log("Test email sent:", resp);
   } catch (err) {
-    console.error("❌ Failed:", err);
+    console.error("Test email failed:", err);
   }
-}
-
-testEmail();
+})();

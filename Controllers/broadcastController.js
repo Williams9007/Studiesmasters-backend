@@ -1,48 +1,62 @@
 import Broadcast from "../models/Broadcast.js";
-import Student from "../models/Student.js";
+import Student from "../models/student.js";
 import Teacher from "../models/teacher.js";
+import QAO from "../models/QaoUser.js"; // if you have QAO model
+import Notification from "../models/Notification.js";
 
-//  Teacher sends message to their students
 export const sendBroadcast = async (req, res) => {
   try {
-    const { message } = req.body;
-    const teacherId = req.user.id; // from verifyTeacher middleware
+    const { subject, message, type, recipients } = req.body;
+    if (!message?.trim())
+      return res.status(400).json({ message: "Message cannot be empty." });
 
-    const teacher = await Teacher.findById(teacherId).populate("subjects");
-    if (!teacher) return res.status(404).json({ message: "Teacher not found" });
+    let usersToNotify = [];
 
-    // Get all students that take any of the teacher’s subjects
-    const students = await Student.find({ subjects: { $in: teacher.subjects } });
+    // --- Determine recipients ---
+    if (recipients && recipients.length > 0) {
+      usersToNotify = recipients;
+    } else {
+      if (type === "students") {
+        const students = await Student.find({});
+        usersToNotify = students.map((s) => s._id);
+      } else if (type === "teachers") {
+        const teachers = await Teacher.find({});
+        usersToNotify = teachers.map((t) => t._id);
+      } else if (type === "qaos") {
+        const qaos = await QAO.find({});
+        usersToNotify = qaos.map((q) => q._id);
+      } else {
+        // all users
+        const students = await Student.find({});
+        const teachers = await Teacher.find({});
+        const qaos = await QAO.find({});
+        usersToNotify = [
+          ...students.map((s) => s._id),
+          ...teachers.map((t) => t._id),
+          ...qaos.map((q) => q._id),
+        ];
+      }
+    }
 
+    // --- Save broadcast ---
     const broadcast = new Broadcast({
+      subject,
       message,
-      teacher: teacher._id,
-      subject: teacher.subjects,
-      recipients: students.map((s) => s._id),
+      sender: req.user.id,
+      recipients: usersToNotify,
     });
-
     await broadcast.save();
+
+    // --- Create notifications ---
+    const notifications = usersToNotify.map((uId) => ({
+      user: uId,
+      type: "broadcast",
+      message: subject ? `${subject} — ${message}` : message,
+      read: false,
+    }));
+    await Notification.insertMany(notifications);
+
     res.status(201).json({ message: "Broadcast sent successfully", broadcast });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Server error" });
-  }
-};
-
-//  Student fetches broadcasts relevant to their subjects
-export const getBroadcastsForStudent = async (req, res) => {
-  try {
-    const { studentId } = req.params;
-    const student = await Student.findById(studentId).populate("subjects");
-    if (!student) return res.status(404).json({ message: "Student not found" });
-
-    const broadcasts = await Broadcast.find({
-      subject: { $in: student.subjects },
-    })
-      .populate("teacher", "name")
-      .sort({ createdAt: -1 });
-
-    res.status(200).json(broadcasts);
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server error" });

@@ -4,12 +4,12 @@ const paymentSchema = new mongoose.Schema(
   {
     studentId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Student", // Ensure this references your Student model
+      ref: "Student",
       required: true,
     },
 
     studentName: {
-      type: String, // added for quick access in admin dashboard
+      type: String,
     },
 
     curriculum: {
@@ -29,21 +29,18 @@ const paymentSchema = new mongoose.Schema(
 
     subjects: {
       type: [String],
-      required: true, // array of subjects paid for
+      required: true,
     },
 
     duration: {
       type: String,
-      required: true, // e.g., "3 months", "6 months"
-    },
-    
-    
-    screenshot: { 
-      data:Buffer,
-      contentType: String,
+      required: true,
     },
 
-
+    screenshot: {
+      type: String, // use either file path or URL
+      required: true,
+    },
 
     amount: {
       type: Number,
@@ -52,11 +49,6 @@ const paymentSchema = new mongoose.Schema(
 
     referenceName: {
       type: String,
-      required: true,
-    },
-
-    screenshot: {
-      type: String, // file path or URL
       required: true,
     },
 
@@ -73,11 +65,14 @@ const paymentSchema = new mongoose.Schema(
 
     reviewedBy: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Admin", // which admin confirmed or rejected
+      ref: "Admin",
       default: null,
     },
   },
   { timestamps: true }
 );
 
-export default mongoose.model("Payment", paymentSchema);
+// ✅ Prevent OverwriteModelError
+const Payment = mongoose.models.Payment || mongoose.model("Payment", paymentSchema);
+
+export default Payment;

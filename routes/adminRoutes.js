@@ -1,256 +1,369 @@
 import express from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+
 import Admin from "../models/admin.js";
-import User from "../models/user.js";
-import Teacher from "../models/teacher.js";
 import Student from "../models/Student.js";
+import Teacher from "../models/teacher.js";
 import QaoUser from "../models/QaoUser.js";
-import Subject from "../models/Subject.js";
-import Payment from "../models/Payment.js";
 import Broadcast from "../models/Broadcast.js";
-import { verifyAdmin } from "../middleware/verifyAdmin.js";
 
-
-
+import { sendOtpEmail } from "../utils/sendOtpEmail.js";
+import { adminAuth } from "../middleware/adminAuth.js";
 
 const router = express.Router();
 
 
-
-
-/* =====================================================
-🔹 ADMIN LOGIN
-===================================================== */
-// admin-login.jsx
-import axios from "axios";
-
-const handleLogin = async (e) => {
-  e.preventDefault();
-  try {
-    const response = await axios.post("http://localhost:5000/api/admin/login", {
-      email,
-      password,
-    });
-
-    // ✅ Save token
-    localStorage.setItem("adminToken", response.data.token);
-
-    // redirect to dashboard
-    window.location.href = "/admin/dashboard";
-  } catch (err) {
-    console.error("Login error:", err.response?.data || err.message);
-  }
+// ================= SOCKET.IO SETTER =================
+let io;
+export const setSocketIO = (socketIoInstance) => {
+  io = socketIoInstance;
 };
 
 
 
-
-/* =====================================================
-🔹 VERIFY ADMIN TOKEN
-===================================================== */
-router.get("/verify", verifyAdmin, async (req, res) => {
-try {
-const admin = await Admin.findById(req.admin._id).select("-password");
-if (!admin) return res.status(404).json({ message: "Admin not found" });
-res.json({ success: true, admin });
-} catch (err) {
-res.status(500).json({ message: "Server error during verification" });
-}
-});
-
-
-
-
-/* =====================================================
-🔹 DASHBOARD USERS
-===================================================== */
-// ✅ Get Admin Dashboard Info (students, teachers, qaos)
-router.get("/dashboard", async (req, res) => {
+// ================= SEED ADMIN =================
+router.post("/seed-admin", async (req, res) => {
   try {
-    const students = await User.find({ role: "student" })
-      .populate("enrolledClasses") // if you have class references
-      .select("-password");
+    const existing = await Admin.findOne({ email: "elgranddios@gmail.com" });
+    if (existing) return res.json({ message: "Admin already exists" });
 
-    const teachers = await Teacher.find({})
-      .populate("assignedSubjects")
-      .select("-password");
+    const hashedPassword = await bcrypt.hash("Admin@123", 10);
 
-    const qaos = await User.find({ role: "qao" }).select("-password");
-
-    res.json({ students, teachers, qaos });
-  } catch (error) {
-    console.error("❌ Dashboard fetch failed:", error);
-    res.status(500).json({ message: "Failed to fetch dashboard data" });
-  }
-});
-
-
-
-
-/* =====================================================
-🔹 STATS
-===================================================== */
-router.get("/stats", verifyAdmin, async (req, res) => {
-try {
-const students = await User.countDocuments({ role: "student" });
-const teachers = await Teacher.countDocuments();
-const qaos = await User.countDocuments({ role: "qao" });
-const subjects = await Subject.countDocuments();
-res.json({ students, teachers, qaos, subjects });
-} catch (err) {
-console.error("Stats fetch error:", err);
-res.status(500).json({ message: "Failed to fetch stats" });
-}
-});
-
-
-
-
-/* =====================================================
-🔹 PAYMENTS
-===================================================== */
-router.get("/payments", verifyAdmin, async (req, res) => {
-try {
-const payments = await Payment.find()
-.populate("studentId", "name email")
-.sort({ createdAt: -1 });
-res.json(payments);
-} catch (err) {
-console.error("Payment fetch error:", err);
-res.status(500).json({ message: "Failed to fetch payments" });
-}
-});
-
-
-
-
-router.put("/payments/:id/confirm", verifyAdmin, async (req, res) => {
-  try {
-    const payment = await Payment.findById(req.params.id);
-    if (!payment) return res.status(404).json({ message: "Payment not found" });
-    payment.status = "confirmed";
-    await payment.save();
-    res.json({ success: true, message: "Payment confirmed successfully" });
-  } catch (err) {
-    console.error("Confirm payment error:", err);
-    res.status(500).json({ message: "Failed to confirm payment" });
-  }
-});
-
-
-
-
-
-/* =====================================================
-🔹 BROADCASTS
-===================================================== */
-router.get("/broadcasts", verifyAdmin, async (req, res) => {
-try {
-const broadcasts = await Broadcast.find().sort({ createdAt: -1 });
-res.json(broadcasts);
-} catch (err) {
-res.status(500).json({ message: "Failed to fetch broadcasts" });
-}
-});
-
-
-
-
-router.post("/broadcasts", verifyAdmin, async (req, res) => {
-  try {
-    const { subject, message, recipients = [], type } = req.body;
-    const broadcast = new Broadcast({
-      subjectName: subject || type || "Announcement",
-      message,
-      recipients,
-      type,
-      createdBy: req.admin?._id || null,
+    const admin = await Admin.create({
+      fullName: "Super Admin",
+      email: "elgranddios@gmail.com",
+      password: hashedPassword,
+      role: "MAIN_ADMIN",
+      adminCode: "EDU-ADMIN",
     });
-    await broadcast.save();
-    res.status(201).json({ success: true, message: "Broadcast created", broadcast });
+
+    res.json({ success: true, message: "Admin seeded", admin });
   } catch (err) {
-    console.error("Broadcast create error:", err);
+    console.error(err);
+    res.status(500).json({ message: "Failed to seed admin" });
+  }
+});
+
+
+
+// ================= LOGIN =================
+router.post("/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password)
+      return res.status(400).json({ message: "Email & password required" });
+
+    const admin = await Admin.findOne({ email });
+    if (!admin) return res.status(401).json({ message: "Invalid credentials" });
+
+    const isMatch = await bcrypt.compare(password, admin.password);
+    if (!isMatch)
+      return res.status(401).json({ message: "Invalid credentials" });
+
+    const otp = Math.floor(100000 + Math.random() * 900000);
+
+    admin.otp = otp;
+    admin.otpExpires = Date.now() + 5 * 60 * 1000;
+    await admin.save();
+
+    await sendOtpEmail(admin.email, otp);
+
+    res.json({
+      success: true,
+      message: "OTP sent",
+      adminId: admin._id,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+
+
+// ================= VERIFY OTP =================
+router.post("/verify-otp", async (req, res) => {
+  try {
+    const { adminId, otp } = req.body;
+
+    const admin = await Admin.findById(adminId);
+    if (!admin) return res.status(404).json({ message: "Admin not found" });
+
+    if (!admin.otp || admin.otpExpires < Date.now())
+      return res.status(400).json({ message: "OTP expired" });
+
+    if (admin.otp.toString() !== otp.toString())
+      return res.status(400).json({ message: "Invalid OTP" });
+
+    const token = jwt.sign(
+      { id: admin._id, role: admin.role },
+      process.env.JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    admin.otp = null;
+    admin.otpExpires = null;
+    await admin.save();
+
+    res.json({ success: true, token });
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+
+
+// ================= DASHBOARD API =================
+router.get("/dashboard", adminAuth, async (req, res) => {
+  try {
+    const totalStudents = await Student.countDocuments();
+    const activeStudents = await Student.countDocuments({ status: "active" });
+    const pendingStudents = await Student.countDocuments({ status: "pending" });
+
+    const totalTeachers = await Teacher.countDocuments();
+    const totalQaos = await QaoUser.countDocuments();
+    const totalBroadcasts = await Broadcast.countDocuments();
+
+    const recentBroadcasts = await Broadcast.find()
+      .populate("sender", "fullName")
+      .sort({ createdAt: -1 })
+      .limit(5);
+
+    res.json({
+      success: true,
+      stats: {
+        totalStudents,
+        activeStudents,
+        pendingStudents,
+        totalTeachers,
+        totalQaos,
+        totalBroadcasts,
+      },
+      recentBroadcasts,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch dashboard" });
+  }
+});
+
+
+
+// ================= NOTIFICATIONS =================
+router.get("/notifications", adminAuth, async (req, res) => {
+  try {
+    const broadcasts = await Broadcast.find()
+      .sort({ createdAt: -1 })
+      .limit(10);
+
+    const notifications = broadcasts.map((b) => ({
+      _id: b._id,
+      message: b.subject || b.message,
+      createdAt: b.createdAt,
+    }));
+
+    res.json({ success: true, notifications });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch notifications" });
+  }
+});
+
+
+
+// ================= STUDENT STATS =================
+router.get("/students", adminAuth, async (req, res) => {
+  try {
+    const totalStudents = await Student.countDocuments();
+    const activeStudents = await Student.countDocuments({ status: "active" });
+    const pendingStudents = await Student.countDocuments({ status: "pending" });
+
+    res.json({
+      success: true,
+      totalStudents,
+      activeStudents,
+      pendingStudents,
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch student stats" });
+  }
+});
+
+// GET all students with details
+router.get("/students", adminAuth, async (req, res) => {
+  try {
+    const students = await Student.find()
+      .select("_id fullName grade package status") // only needed fields
+      .sort({ grade: 1, package: 1, fullName: 1 }); // sort by grade, package, then name
+
+    // Optionally, also return counts
+    const totalStudents = students.length;
+    const activeStudents = students.filter((s) => s.status === "active").length;
+    const pendingStudents = students.filter((s) => s.status === "pending").length;
+
+    res.json({
+      success: true,
+      students,
+      totalStudents,
+      activeStudents,
+      pendingStudents,
+    });
+  } catch (err) {
+    console.error("❌ Error fetching students:", err);
+    res.status(500).json({ message: "Failed to fetch students" });
+  }
+});
+
+
+// GET all students with basic info for broadcast
+router.get("/students/list", adminAuth, async (req, res) => {
+  try {
+    const students = await Student.find()
+      .select("_id fullName grade package") // only what you need
+      .sort({ grade: 1, package: 1 }); // sort by grade, then package
+
+    res.json({ success: true, students });
+  } catch (err) {
+    console.error("❌ Error fetching students for broadcast:", err);
+    res.status(500).json({ message: "Failed to fetch students" });
+  }
+});
+
+
+// ================= TEACHERS STATS =================
+router.get("/teachers", adminAuth, async (req, res) => {
+  try {
+    const totalTeachers = await Teacher.countDocuments();
+    const activeTeachers = await Teacher.countDocuments({ status: "active" });
+    const pendingTeachers = await Teacher.countDocuments({ status: "pending" });
+
+    res.json({
+      success: true,
+      totalTeachers,
+      activeTeachers,
+      pendingTeachers,
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch teachers stats" });
+  }
+});
+
+
+
+
+// ================= SEND BROADCAST =================
+router.post("/broadcast", adminAuth, async (req, res) => {
+  try {
+    const { subject, message, type } = req.body;
+
+    const broadcast = await Broadcast.create({
+      sender: req.admin.id,
+      subject,
+      message,
+      type,
+    });
+
+    if (io) io.emit("new-broadcast", broadcast);
+
+    res.json({ success: true, broadcast });
+  } catch (err) {
     res.status(500).json({ message: "Failed to send broadcast" });
   }
 });
 
 
-
-
-/* =====================================================
-🔹 ASSIGN SUBJECT
-===================================================== */
-router.post("/assign-subject", verifyAdmin, async (req, res) => {
-try {
-const { teacherId, subjectId } = req.body;
-const teacher = await Teacher.findById(teacherId);
-if (!teacher) return res.status(404).json({ message: "Teacher not found" });
-teacher.subjects.push(subjectId);
-await teacher.save();
-res.json({ success: true, message: "Subject assigned successfully" });
-} catch (err) {
-console.error("Assign subject error:", err);
-res.status(500).json({ message: "Failed to assign subject" });
-}
-});
-
-
-
-
-/* =====================================================
-🔹 DELETE USER
-===================================================== */
-/* =====================================================
-🔹 CREATE USER
-===================================================== */
-router.post("/users", verifyAdmin, async (req, res) => {
+// Broadcast to a single student
+router.post("/broadcast/student", adminAuth, async (req, res) => {
   try {
-    const { name, email, role, password } = req.body;
-    if (!name || !email || !role || !password) return res.status(400).json({ message: "Missing fields" });
+    const { studentId, subject, message } = req.body;
+    if (!studentId || !message) return res.status(400).json({ message: "Student ID and message required" });
 
-    const existing = await User.findOne({ email });
-    if (existing) return res.status(400).json({ message: "User already exists" });
+    // Save in DB
+    const broadcast = await Broadcast.create({
+      sender: req.admin.id,
+      type: "single",
+      recipients: [studentId],
+      recipientModel: "Student",
+      subject,
+      message,
+      recipientsCount: 1,
+    });
 
-    const salt = await bcrypt.genSalt(10);
-    const hashed = await bcrypt.hash(password, salt);
+    // Emit only to that student's socket room
+    if (io) io.to(studentId.toString()).emit("new-broadcast", broadcast);
 
-    const newUser = await User.create({ name, email, role, password: hashed });
-
-    // create role-specific docs
-    if (role === "teacher") {
-      await Teacher.create({ userId: newUser._id, name, email });
-    }
-    if (role === "student") {
-      await Student.create({ userId: newUser._id, name, email });
-    }
-    if (role === "qao") {
-      await QaoUser.create({ userId: newUser._id, name, email });
-    }
-
-    res.status(201).json({ message: "User created", user: newUser });
+    res.json({ success: true, message: "Broadcast sent to student", broadcast });
   } catch (err) {
-    console.error("Create user error:", err);
-    res.status(500).json({ message: "Failed to create user" });
-  }
-});
-
-/* =====================================================
-🔹 DELETE USER
-===================================================== */
-router.delete("/users/:id", verifyAdmin, async (req, res) => {
-  try {
-    const user = await User.findById(req.params.id);
-    if (!user) return res.status(404).json({ message: "User not found" });
-    await user.remove();
-    res.json({ message: "User deleted successfully" });
-  } catch (err) {
-    console.error("Delete user error:", err);
-    res.status(500).json({ message: "Failed to delete user" });
+    console.error("❌ Error sending broadcast to student:", err);
+    res.status(500).json({ success: false, message: "Failed to send broadcast" });
   }
 });
 
 
+
+
+// 2️⃣ Broadcast to all students
+router.post("/broadcast/all", adminAuth, async (req, res) => {
+  try {
+    const { subject, message } = req.body;
+    if (!message) return res.status(400).json({ message: "Message required" });
+
+    const students = await Student.find().select("_id");
+    const studentIds = students.map((s) => s._id);
+
+    const broadcast = await Broadcast.create({
+      sender: req.admin.id,
+      type: "students",
+      recipients: studentIds,
+      recipientModel: "Student",
+      subject,
+      message,
+      recipientsCount: studentIds.length,
+    });
+
+    // Emit to all students (assuming they join their own room by studentId)
+    if (io) studentIds.forEach((id) => io.to(id.toString()).emit("new-broadcast", broadcast));
+
+    res.json({ success: true, message: "Broadcast sent to all students", broadcast });
+  } catch (err) {
+    console.error("❌ Error sending broadcast to all students:", err);
+    res.status(500).json({ success: false, message: "Failed to send broadcast" });
+  }
+});
+
+
+
+
+
+// ================= BROADCAST HISTORY =================
+router.get("/broadcasts", adminAuth, async (req, res) => {
+  try {
+    const broadcasts = await Broadcast.find()
+      .populate("sender", "fullName email")
+      .sort({ createdAt: -1 });
+
+    res.json({ success: true, broadcasts });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch broadcasts" });
+  }
+});
+
+
+
+// ================= QAO USERS =================
+router.get("/qao-users", adminAuth, async (req, res) => {
+  try {
+    const qaoUsers = await QaoUser.find().sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      qaoUsers,
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch QAO users" });
+  }
+});
 
 
 export default router;

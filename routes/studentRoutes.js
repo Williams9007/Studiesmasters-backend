@@ -260,4 +260,65 @@ router.post("/renew-payment/:studentId", upload.single("proofImage"), async (req
   }
 });
 
+
+
+/* ==================== FETCH STUDENT BROADCASTS ==================== */
+/* ==================== FETCH STUDENT BROADCASTS ==================== */
+router.get("/broadcasts/:studentId", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+
+    const broadcasts = await Broadcast.find({
+      $or: [
+        { type: "all" },               // Broadcasts sent to all users
+        { type: "students" },          // Broadcasts sent to all students
+        { recipients: studentId },     // Broadcasts sent specifically to this student
+      ],
+    })
+      .sort({ createdAt: -1 })
+      .populate("sender", "fullName email"); // optional: show admin info
+
+    res.json({ success: true, broadcasts });
+  } catch (error) {
+    console.error("❌ Error fetching broadcasts:", error);
+    res.status(500).json({ message: "Server error fetching broadcasts" });
+  }
+});
+
+
+// GET student assignments
+router.get("/assignments/:studentId", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const assignments = await Assignment.find({ studentId }).sort({ createdAt: -1 });
+    res.json(assignments || []);
+  } catch (err) {
+    console.error("❌ Error fetching assignments:", err);
+    res.status(500).json({ message: "Server error fetching assignments" });
+  }
+});
+
+// GET student broadcasts
+router.get("/broadcasts/:studentId", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const broadcasts = await Broadcast.find({
+      $or: [
+        { type: "all" },
+        { type: "students" },
+        { recipients: studentId },
+      ],
+    })
+      .sort({ createdAt: -1 })
+      .populate("sender", "fullName email");
+
+    res.json({ success: true, broadcasts });
+  } catch (err) {
+    console.error("❌ Error fetching broadcasts:", err);
+    res.status(500).json({ message: "Server error fetching broadcasts" });
+  }
+});
+
+
+
 export default router;

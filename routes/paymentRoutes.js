@@ -1,10 +1,12 @@
 import express from "express";
 import multer from "multer";
 import mongoose from "mongoose";
-import Payment from "../models/Payment.js";
+import Payment from "../models/payment.js";
 import ClassEnrollment from "../models/ClassEnrollment.js";
-import Student from "../models/Student.js";
+import Student from "../models/student.js";
 import Package from "../models/package.js";
+import { adminAuth } from "../middleware/adminAuth.js";
+
 
 const router = express.Router();
 
@@ -185,6 +187,31 @@ router.delete("/:id", async (req, res) => {
   } catch (err) {
     console.error("Error deleting payment:", err);
     res.status(500).json({ message: err.message });
+  }
+});
+
+
+// ==================== ADMIN: GET PAYMENT HISTORY ====================
+router.get("/admin/history", adminAuth, async (req, res) => {
+  try {
+    const payments = await Payment.find()
+      .populate("studentId", "fullName email grade")
+      .sort({ createdAt: -1 });
+
+    const totalAmount = payments.reduce(
+      (sum, p) => sum + Number(p.amount || 0),
+      0
+    );
+
+    res.json({
+      success: true,
+      currency: "GHS",
+      totalAmount,
+      payments,
+    });
+  } catch (err) {
+    console.error("Fetch payment history error:", err);
+    res.status(500).json({ message: "Failed to fetch payment history" });
   }
 });
 
