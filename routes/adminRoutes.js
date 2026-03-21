@@ -10,6 +10,9 @@ import Broadcast from "../models/Broadcast.js";
 
 import { sendOtpEmail } from "../utils/sendOtpEmail.js";
 import { adminAuth } from "../middleware/adminAuth.js";
+import Users from "../models/Users.js";
+import Payment from "../models/Payment.js";
+
 
 const router = express.Router();
 
@@ -44,6 +47,8 @@ router.post("/seed-admin", async (req, res) => {
     res.status(500).json({ message: "Failed to seed admin" });
   }
 });
+
+
 
 
 
@@ -148,7 +153,6 @@ router.get("/dashboard", adminAuth, async (req, res) => {
     res.status(500).json({ message: "Failed to fetch dashboard" });
   }
 });
-
 
 
 // ================= NOTIFICATIONS =================
@@ -256,6 +260,7 @@ router.get("/teachers", adminAuth, async (req, res) => {
 router.post("/broadcast", adminAuth, async (req, res) => {
   try {
     const { subject, message, type } = req.body;
+    if (!message) return res.status(400).json({ message: "Message required" });
 
     const broadcast = await Broadcast.create({
       sender: req.admin.id,
@@ -264,22 +269,23 @@ router.post("/broadcast", adminAuth, async (req, res) => {
       type,
     });
 
+    // Emit to all connected clients (all rooms)
     if (io) io.emit("new-broadcast", broadcast);
 
     res.json({ success: true, broadcast });
   } catch (err) {
+    console.error("❌ Error sending broadcast:", err);
     res.status(500).json({ message: "Failed to send broadcast" });
   }
 });
 
-
-// Broadcast to a single student
+// ================= BROADCAST TO SINGLE STUDENT =================
 router.post("/broadcast/student", adminAuth, async (req, res) => {
   try {
     const { studentId, subject, message } = req.body;
-    if (!studentId || !message) return res.status(400).json({ message: "Student ID and message required" });
+    if (!studentId || !message)
+      return res.status(400).json({ message: "Student ID and message required" });
 
-    // Save in DB
     const broadcast = await Broadcast.create({
       sender: req.admin.id,
       type: "single",
@@ -292,6 +298,7 @@ router.post("/broadcast/student", adminAuth, async (req, res) => {
 
     // Emit only to that student's socket room
     if (io) io.to(studentId.toString()).emit("new-broadcast", broadcast);
+    console.log(`✅ Broadcast sent to student room: ${studentId}`);
 
     res.json({ success: true, message: "Broadcast sent to student", broadcast });
   } catch (err) {
@@ -300,17 +307,14 @@ router.post("/broadcast/student", adminAuth, async (req, res) => {
   }
 });
 
-
-
-
-// 2️⃣ Broadcast to all students
+// ================= BROADCAST TO ALL STUDENTS =================
 router.post("/broadcast/all", adminAuth, async (req, res) => {
   try {
     const { subject, message } = req.body;
     if (!message) return res.status(400).json({ message: "Message required" });
 
     const students = await Student.find().select("_id");
-    const studentIds = students.map((s) => s._id);
+    const studentIds = students.map((s) => s._id.toString()); // ensure string
 
     const broadcast = await Broadcast.create({
       sender: req.admin.id,
@@ -322,8 +326,14 @@ router.post("/broadcast/all", adminAuth, async (req, res) => {
       recipientsCount: studentIds.length,
     });
 
-    // Emit to all students (assuming they join their own room by studentId)
-    if (io) studentIds.forEach((id) => io.to(id.toString()).emit("new-broadcast", broadcast));
+    // Emit to all students individually (each joins their own room)
+    if (io) {
+      studentIds.forEach((id) => {
+       io.emit("broadcast:new", message);
+
+      });
+      console.log(`✅ Broadcast sent to all students: ${studentIds.length} rooms`);
+    }
 
     res.json({ success: true, message: "Broadcast sent to all students", broadcast });
   } catch (err) {
@@ -331,6 +341,7 @@ router.post("/broadcast/all", adminAuth, async (req, res) => {
     res.status(500).json({ success: false, message: "Failed to send broadcast" });
   }
 });
+
 
 
 
@@ -364,6 +375,288 @@ router.get("/qao-users", adminAuth, async (req, res) => {
     res.status(500).json({ message: "Failed to fetch QAO users" });
   }
 });
+
+
+
+
+// ================= ALL USERS (UNIFIED) =================
+router.get("/users", adminAuth, async (req, res) => {
+  try {
+    const students = await Student.find().select("_id fullName email status createdAt");
+    const teachers = await Teacher.find().select("_id fullName email status createdAt");
+    const qaos = await QaoUser.find().select("_id fullName email status createdAt");
+    const admins = await Admin.find().select("_id fullName email createdAt");
+
+    // Normalize data for frontend
+    const formattedUsers = [
+      ...students.map(u => ({ ...u.toObject(), role: "student", name: u.fullName })),
+      ...teachers.map(u => ({ ...u.toObject(), role: "teacher", name: u.fullName })),
+      ...qaos.map(u => ({ ...u.toObject(), role: "qao", name: u.fullName })),
+      ...admins.map(u => ({ ...u.toObject(), role: "admin", name: u.fullName, status: "active" })),
+    ];
+
+    // Sort newest first
+    formattedUsers.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    res.json({ success: true, users: formattedUsers });
+  } catch (err) {
+    console.error("❌ Error fetching users:", err);
+    res.status(500).json({ message: "Failed to fetch users" });
+  }
+});
+
+// ================= GET SINGLE USER =================
+router.get("/users/:id/:role", adminAuth, async (req, res) => {
+  try {
+    const { id, role } = req.params;
+
+    let user;
+    switch (role.toLowerCase()) {
+      case "student":
+        user = await Student.findById(id);
+        break;
+      case "teacher":
+        user = await Teacher.findById(id);
+        break;
+      case "qao":
+        user = await QaoUser.findById(id);
+        break;
+      case "admin":
+        user = await Admin.findById(id);
+        break;
+      default:
+        return res.status(400).json({ message: "Invalid role" });
+    }
+
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    res.json({ success: true, user });
+  } catch (err) {
+    console.error("❌ Error fetching user:", err);
+    res.status(500).json({ message: "Failed to fetch user" });
+  }
+});
+
+// ================= DELETE USER =================
+router.delete("/users/:id/:role", adminAuth, async (req, res) => {
+  try {
+    const { id, role } = req.params;
+
+    let deleted;
+    switch (role.toLowerCase()) {
+      case "student":
+        deleted = await Student.findByIdAndDelete(id);
+        break;
+      case "teacher":
+        deleted = await Teacher.findByIdAndDelete(id);
+        break;
+      case "qao":
+        deleted = await QaoUser.findByIdAndDelete(id);
+        break;
+      case "admin":
+        deleted = await Admin.findByIdAndDelete(id);
+        break;
+      default:
+        return res.status(400).json({ message: "Invalid role" });
+    }
+
+    if (!deleted) return res.status(404).json({ message: "User not found or already deleted" });
+
+    res.json({ success: true, message: "User deleted successfully" });
+  } catch (err) {
+    console.error("❌ Error deleting user:", err);
+    res.status(500).json({ message: "Failed to delete user" });
+  }
+});
+
+// ================= CREATE USER =================
+router.post("/users/create", adminAuth, async (req, res) => {
+  try {
+    const {
+      fullName,
+      name,
+      email,
+      password,
+      role,
+      phone,
+      experience,
+      curriculum,
+    } = req.body;
+
+    if (!email || !password || !role) {
+      return res.status(400).json({
+        message: "Email, password and role are required",
+      });
+    }
+
+    const normalizedRole = role.toLowerCase();
+
+    // 🔎 Check duplicate email across ALL collections
+    const existingUser =
+      (await Admin.findOne({ email })) ||
+      (await Teacher.findOne({ email })) ||
+      (await QaoUser.findOne({ email })) ||
+      (await Student.findOne({ email }));
+
+    if (existingUser) {
+      return res.status(400).json({
+        message: "User already exists with this email",
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    let newUser;
+
+    // ================= ADMIN =================
+    if (normalizedRole === "admin") {
+      newUser = await Admin.create({
+        fullName,
+        email,
+        password: hashedPassword,
+        role: "MINOR_ADMIN", // ✅ must match enum in admin.js
+      });
+    }
+
+    // ================= TEACHER =================
+    else if (normalizedRole === "teacher") {
+      if (!phone || !experience || !curriculum) {
+        return res.status(400).json({
+          message:
+            "Teacher requires phone, experience and curriculum",
+        });
+      }
+
+      newUser = await Teacher.create({
+        fullName,
+        email,
+        password: hashedPassword,
+        phone,
+        experience,
+        curriculum,
+        role: "teacher",
+        status: "active",
+      });
+    }
+
+    // ================= QAO =================
+   else if (normalizedRole === "qao") {
+  newUser = await QaoUser.create({
+    name: fullName || name,
+    email,
+    password: hashedPassword, // now valid
+    role: "qao",
+  });
+}
+
+
+    else {
+      return res.status(400).json({
+        message: "Invalid role selected",
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      message: "User created successfully",
+      user: newUser,
+    });
+
+  } catch (error) {
+    console.error("❌ Error creating user:", error);
+    res.status(500).json({
+      message: "Server error while creating user",
+    });
+  }
+});
+
+// ================= GET ALL PAYMENTS =================
+router.get("/payments", adminAuth, async (req, res) => {
+  try {
+    const payments = await Payment.find()
+      .select("-__v") // remove unnecessary field
+      .populate({
+        path: "studentId",
+        select: "fullName email grade subscriptionExpiry accountStatus",
+      })
+      .sort({ createdAt: -1 })
+      .lean(); // improves performance for read-only data
+
+    res.status(200).json({
+      success: true,
+      count: payments.length,
+      payments,
+    });
+
+  } catch (error) {
+    console.error("❌ Error fetching payments:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching payments",
+    });
+  }
+});
+
+
+
+// ================= CONFIRM PAYMENT =================
+router.put("/payments/:id/confirm", adminAuth, async (req, res) => {
+  try {
+    const payment = await Payment.findById(req.params.id);
+
+    if (!payment)
+      return res.status(404).json({ message: "Payment not found" });
+
+    if (payment.status === "confirmed")
+      return res.json({ message: "Payment already confirmed" });
+
+    const startDate = new Date();
+    const endDate = new Date();
+    endDate.setMonth(endDate.getMonth() + 1); // 1 month subscription
+
+    // Update payment
+    payment.status = "confirmed";
+    payment.subscriptionStart = startDate;
+    payment.subscriptionEnd = endDate;
+    payment.reviewedBy = req.admin._id; // if adminAuth attaches admin
+    await payment.save();
+
+    // Update student using studentId
+    const student = await Student.findById(payment.studentId);
+
+    if (student) {
+      student.subscriptionStatus = "active";
+      student.accountStatus = "active";
+      student.subscriptionExpiry = endDate;
+      student.status = "active";
+      await student.save();
+    }
+
+    // 🔔 Notify dashboard
+    if (io) {
+      io.emit("payment:confirmed", {
+        studentName: student?.fullName,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Payment confirmed & student activated",
+    });
+
+  } catch (error) {
+    console.error("❌ Error confirming payment:", error);
+    res.status(500).json({
+      message: "Error confirming payment",
+    });
+  }
+});
+
+
+
+
+
+
 
 
 export default router;

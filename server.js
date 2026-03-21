@@ -1,25 +1,47 @@
-// server.js
-import express from "express";
+// ==========================
+// ENV MUST LOAD FIRST
+// ==========================
 import dotenv from "dotenv";
+dotenv.config();
+
+// ==========================
+// IMPORTS
+// ==========================
+import express from "express";
 import cors from "cors";
-import connectDB from "./config/db.js";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createServer } from "http";
 import { Server } from "socket.io";
+import connectDB from "./config/db.js";
 
 // Routes
 import studentRoutes from "./routes/studentRoutes.js";
 import teacherRoutes from "./routes/teacherRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
-import adminRoutes, { setSocketIO } from "./routes/adminRoutes.js";
+import adminRoutes from "./routes/adminRoutes.js";
+import { setSocketIO as setAdminSocket } from "./routes/adminRoutes.js";
+import { setSocketIO as setBroadcastSocket } from "./controllers/broadcastController.js";
 
-dotenv.config();
-connectDB();
 
+
+// ==========================
+// VALIDATE ENV VARIABLES
+// ==========================
+if (!process.env.MONGO_URI) {
+  console.error("❌ MONGO_URI is not defined in .env");
+  process.exit(1);
+}
+
+// ==========================
+// APP INITIALIZATION
+// ==========================
 const app = express();
+const httpServer = createServer(app);
 
-// ------------------ CORS ------------------
+// ==========================
+// CORS CONFIG
+// ==========================
 const allowedOrigins = [
   "http://localhost:5173",
   "https://studiesmasters-frontend.onrender.com",
@@ -31,80 +53,115 @@ app.use(
   cors({
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
-      if (!allowedOrigins.includes(origin))
-        return callback(new Error(`CORS policy: ${origin} is not allowed`), false);
+      if (!allowedOrigins.includes(origin)) {
+        return callback(
+          new Error(`CORS policy: ${origin} is not allowed`),
+          false
+        );
+      }
       return callback(null, true);
     },
     credentials: true,
   })
 );
 
-// ------------------ Body parsing ------------------
+// ==========================
+// BODY PARSER
+// ==========================
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ------------------ Static files ------------------
+// ==========================
+// STATIC FILES
+// ==========================
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-// ------------------ Routes ------------------
+// ==========================
+// ROUTES
+// ==========================
 app.use("/api/students", studentRoutes);
 app.use("/api/teachers", teacherRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/admin", adminRoutes);
 
-// ------------------ Default route ------------------
-app.get("/", (req, res) => res.send("EduConnect API is running"));
-
-// ------------------ Global error handler ------------------
-app.use((err, req, res, next) => {
-  console.error("❌ Error:", err.stack);
-  res.status(500).json({ success: false, message: err.message });
+app.get("/", (req, res) => {
+  res.send("🚀 EduConnect API is running");
 });
 
-// ------------------ HTTP & Socket.IO ------------------
-const PORT = process.env.PORT || 5000;
-const httpServer = createServer(app);
-
+// ==========================
+// SOCKET.IO SETUP
+// ==========================
 const io = new Server(httpServer, {
-  cors: { origin: allowedOrigins, credentials: true },
+  cors: {
+    origin: allowedOrigins,
+    credentials: true,
+  },
 });
 
-// Make io available in adminRoutes for sending broadcasts
-setSocketIO(io);
+// Make io available in routes
+// Make io available everywhere
+setAdminSocket(io);
+setBroadcastSocket(io);
 app.set("io", io);
 
-// ------------------ Socket.IO connections ------------------
-io.on("connection", (socket) => {
-  console.log("New client connected:", socket.id);
 
-  // Students send studentId as query
-  const studentId = socket.handshake.query.studentId;
-  if (studentId) {
-    socket.join(studentId);
-    console.log(`Student ${studentId} joined room ${studentId}`);
+// ==========================
+// ONLINE USERS MAP
+// ==========================
+const onlineUsers = new Map(); // userId -> socketId
+app.set("onlineUsers", onlineUsers);
+
+// ==========================
+// SOCKET CONNECTION
+// ==========================
+io.on("connection", (socket) => {
+  console.log("🔌 Raw socket connected:", socket.id);
+
+  const { userId } = socket.handshake.query;
+
+  if (userId) {
+    socket.userId = userId;
+    onlineUsers.set(userId, socket.id);
+    console.log("✅ User connected with ID:", userId);
   }
 
   socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
+    if (socket.userId) {
+      onlineUsers.delete(socket.userId);
+      console.log("❌ User disconnected:", socket.userId);
+    }
   });
 });
 
-// ------------------ Broadcast helper functions ------------------
-// Send to a single student
-export const sendBroadcastToStudent = (studentId, message) => {
-  io.to(studentId).emit("new-broadcast", message);
-};
+// ==========================
+// GLOBAL ERROR HANDLER
+// ==========================
+app.use((err, req, res, next) => {
+  console.error("❌ Server Error:", err.message);
+  res.status(500).json({
+    success: false,
+    message: err.message,
+  });
+});
 
-// Send to all students
-export const broadcastToAllStudents = async (studentsIds = [], message) => {
-  if (studentsIds.length > 0) {
-    studentsIds.forEach((id) => io.to(id).emit("new-broadcast", message));
-  } else {
-    io.emit("new-broadcast", message);
+// ==========================
+// START SERVER ONLY AFTER DB CONNECTS
+// ==========================
+const PORT = process.env.PORT || 5000;
+
+const startServer = async () => {
+  try {
+    await connectDB();
+
+    httpServer.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error("❌ Failed to start server:", error.message);
+    process.exit(1);
   }
 };
 
-// ------------------ Start server ------------------
-httpServer.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+startServer();

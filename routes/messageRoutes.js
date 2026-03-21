@@ -1,174 +1,118 @@
 import express from "express";
 import Message from "../models/Message.js";
-import Teacher from "../models/teacher.js";
-import QaoUser from "../models/QaoUser.js";
-import { verifyQao } from "../middleware/verifyQao.js";
-import { verifyTeacher } from "../middleware/verifyTeacher.js"; // ✅ you'll add this middleware (shown below)
+import MessageRecipient from "../models/MessageRecipient.js";
+import User from "../models/user.js";
+import { verifyAuth } from "../middleware/verifyAuth.js"; 
+// verifyAuth should attach req.user
 
 const router = express.Router();
 
 /* =====================================================
-   📨 1. QAO → Teacher  (Send Message)
+   📤 SEND MESSAGE (Admin, Teacher, QAO)
+   Can send:
+   - To specific user IDs
+   - OR by role (broadcast)
 ===================================================== */
-router.post("/send/qao", verifyQao, async (req, res) => {
+router.post("/send", verifyAuth, async (req, res) => {
   try {
-    const { receiverId, subject, message } = req.body;
+    const { subject, body, recipients, role } = req.body;
 
-    if (!receiverId || !subject || !message)
-      return res.status(400).json({ success: false, message: "All fields are required" });
+    if (!subject || !body)
+      return res.status(400).json({ success: false, message: "Subject and body required" });
 
-    const newMessage = await Message.create({
+    // 1️⃣ Create core message
+    const message = await Message.create({
       sender: req.user._id,
-      receiver: receiverId,
       subject,
-      message,
-      senderRole: "qao",
-      receiverRole: "teacher",
+      body,
     });
 
-    res.status(201).json({ success: true, message: newMessage });
+    // 2️⃣ Resolve recipients
+    let users = [];
+
+    if (recipients?.length) {
+      users = await User.find({ _id: { $in: recipients } });
+    } else if (role) {
+      users = await User.find({ role });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: "Provide recipients array OR role",
+      });
+    }
+
+    // 3️⃣ Insert delivery records
+    const rows = users.map((u) => ({
+      message: message._id,
+      recipient: u._id,
+    }));
+
+    await MessageRecipient.insertMany(rows, { ordered: false });
+
+    // 4️⃣ Emit socket to online users
+    const onlineUsers = req.app.get("onlineUsers");
+const io = req.app.get("io");
+
+users.forEach((u) => {
+  const socketId = onlineUsers.get(u._id.toString());
+  if (socketId) {
+    io.to(socketId).emit("message:new", { messageId: message._id });
+  }
+});
+
+
+    res.status(201).json({ success: true, message });
+
   } catch (error) {
-    console.error("QAO send message error:", error);
+    console.error("Send message error:", error);
     res.status(500).json({ success: false, message: "Failed to send message" });
   }
 });
 
-/* =====================================================
-   💬 2. Teacher → QAO  (Reply or Send New)
-===================================================== */
-router.post("/send/teacher", verifyTeacher, async (req, res) => {
-  try {
-    const { qaoId, subject, message } = req.body;
-
-    if (!qaoId || !subject || !message)
-      return res.status(400).json({ success: false, message: "All fields are required" });
-
-    const newMessage = await Message.create({
-      sender: req.user._id,
-      receiver: qaoId,
-      subject,
-      message,
-      senderRole: "teacher",
-      receiverRole: "qao",
-    });
-
-    res.status(201).json({ success: true, message: newMessage });
-  } catch (error) {
-    console.error("Teacher send message error:", error);
-    res.status(500).json({ success: false, message: "Failed to send message" });
-  }
-});
 
 /* =====================================================
-   🔁 3. Fetch Conversation Between QAO & Teacher
+   📥 GET INBOX (For Logged In User)
 ===================================================== */
-router.get("/conversation/:qaoId/:teacherId", async (req, res) => {
-  const { qaoId, teacherId } = req.params;
-
+router.get("/inbox", verifyAuth, async (req, res) => {
   try {
-    const conversation = await Message.find({
-      $or: [
-        { sender: qaoId, receiver: teacherId },
-        { sender: teacherId, receiver: qaoId },
-      ],
+    const inbox = await MessageRecipient.find({
+      recipient: req.user._id,
     })
-      .populate("sender", "fullName email")
-      .populate("receiver", "fullName email")
-      .sort({ createdAt: 1 });
-
-    res.json({ success: true, messages: conversation });
-  } catch (error) {
-    console.error("Conversation fetch error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch messages" });
-  }
-});
-
-/* =====================================================
-   📥 4. Get Inbox for QAO
-===================================================== */
-router.get("/inbox/qao", verifyQao, async (req, res) => {
-  try {
-    const messages = await Message.find({ receiver: req.user._id })
-      .populate("sender", "fullName email role")
+      .populate({
+        path: "message",
+        populate: { path: "sender", select: "fullName role" },
+      })
       .sort({ createdAt: -1 });
 
-    res.json({ success: true, messages });
+    res.json({ success: true, inbox });
+
   } catch (error) {
-    console.error("QAO inbox fetch error:", error);
+    console.error("Inbox error:", error);
     res.status(500).json({ success: false, message: "Failed to load inbox" });
   }
 });
 
-/* =====================================================
-   📥 5. Get Inbox for Teacher
-===================================================== */
-router.get("/inbox/teacher", verifyTeacher, async (req, res) => {
-  try {
-    const messages = await Message.find({ receiver: req.user._id })
-      .populate("sender", "fullName email role")
-      .sort({ createdAt: -1 });
-
-    res.json({ success: true, messages });
-  } catch (error) {
-    console.error("Teacher inbox fetch error:", error);
-    res.status(500).json({ success: false, message: "Failed to load inbox" });
-  }
-});
 
 /* =====================================================
-   🧑‍🏫 6. Fetch Teachers (for QAO to Message)
+   📖 MARK MESSAGE AS READ
 ===================================================== */
-router.get("/teachers", verifyQao, async (req, res) => {
+router.post("/:messageId/read", verifyAuth, async (req, res) => {
   try {
-    const teachers = await Teacher.find().select("_id fullName email");
-    res.json({ success: true, teachers });
+    await MessageRecipient.findOneAndUpdate(
+      {
+        message: req.params.messageId,
+        recipient: req.user._id,
+      },
+      {
+        isRead: true,
+        readAt: new Date(),
+      }
+    );
+
+    res.json({ success: true });
+
   } catch (error) {
-    console.error("Fetch teachers error:", error);
-    res.status(500).json({ success: false, message: "Failed to load teachers" });
-  }
-});
-
-
-
-// ✅ Get all messages for a teacher (including QAO replies)
-router.get("/teacher/:teacherId", async (req, res) => {
-  try {
-    const messages = await Message.find({
-      $or: [
-        { sender: req.params.teacherId },
-        { receiver: req.params.teacherId }
-      ]
-    })
-      .populate("sender", "name role")
-      .populate("receiver", "name role")
-      .sort({ createdAt: -1 });
-    res.json(messages);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ✅ Teacher replies to a message from QAO
-router.post("/reply/:messageId", async (req, res) => {
-  try {
-    const { reply, teacherId } = req.body;
-    const originalMsg = await Message.findById(req.params.messageId);
-
-    if (!originalMsg)
-      return res.status(404).json({ message: "Message not found" });
-
-    const replyMsg = await Message.create({
-      sender: teacherId,
-      receiver: originalMsg.sender, // QAO
-      subject: `Re: ${originalMsg.subject}`,
-      message: reply,
-      senderRole: "teacher",
-      receiverRole: "qao",
-    });
-
-    res.json(replyMsg);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(500).json({ success: false, message: "Failed to mark read" });
   }
 });
 
