@@ -21,7 +21,7 @@ import teacherRoutes from "./routes/teacherRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import { setSocketIO as setAdminSocket } from "./routes/adminRoutes.js";
-import { setSocketIO as setBroadcastSocket } from "./controllers/broadcastController.js";
+import { setSocketIO as setBroadcastSocket } from "./Controllers/broadcastController.js";
 
 
 
