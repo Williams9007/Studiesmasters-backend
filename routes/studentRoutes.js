@@ -21,33 +21,63 @@ router.post("/register", async (req, res) => {
   try {
     const { fullName, email, phone, password, curriculum, package: pkg, grade, subjects, totalAmount, startDate, finishDate, studyDuration } = req.body;
 
-    const selectedSubjects = Array.isArray(subjects) ? subjects : typeof subjects === "string" && subjects.trim() !== "" ? [subjects] : [];
+    const selectedSubjects = Array.isArray(subjects) 
+      ? subjects 
+      : typeof subjects === "string" && subjects.trim() !== "" 
+        ? [subjects] 
+        : [];
+
     if (!fullName || !email || !phone || !password || !curriculum || !pkg || !grade || selectedSubjects.length === 0) {
       return res.status(400).json({ message: "All required fields must be provided and at least one subject selected." });
     }
 
-    if (await Student.findOne({ email })) return res.status(400).json({ message: "Email already registered" });
+    if (await Student.findOne({ email })) {
+      return res.status(400).json({ message: "Email already registered" });
+    }
 
     const foundSubjects = await Subject.find({ _id: { $in: selectedSubjects } });
     if (!foundSubjects.length) return res.status(400).json({ message: "No matching subjects found." });
 
-    const invalidSubjects = foundSubjects.filter(s => (s.package || "").trim().toUpperCase() !== (pkg || "").trim().toUpperCase() || (s.grade || "").trim().toUpperCase() !== (grade || "").trim().toUpperCase());
+    const invalidSubjects = foundSubjects.filter(s => 
+      (s.package || "").trim().toUpperCase() !== (pkg || "").trim().toUpperCase() || 
+      (s.grade || "").trim().toUpperCase() !== (grade || "").trim().toUpperCase()
+    );
     if (invalidSubjects.length > 0) return res.status(400).json({ message: "Some subjects do not match package/grade." });
 
     const hashedPassword = await bcrypt.hash(password, await bcrypt.genSalt(10));
 
     const student = new Student({
-      fullName, email, phone, password: hashedPassword,
-      curriculum, package: pkg, grade,
+      fullName,
+      email,
+      phone,
+      password: hashedPassword,
+      curriculum,
+      package: pkg,
+      grade,
       subjectsEnrolled: foundSubjects.map(s => s._id),
-      totalAmount, startDate, finishDate, studyDuration
+      totalAmount,
+      startDate,
+      finishDate,
+      studyDuration
     });
 
     await student.save();
-    await Subject.updateMany({ _id: { $in: foundSubjects.map(s => s._id) } }, { $push: { enrolledStudents: student._id } });
+
+    await Subject.updateMany(
+      { _id: { $in: foundSubjects.map(s => s._id) } }, 
+      { $push: { enrolledStudents: student._id } }
+    );
 
     try {
-      await sendWelcomeEmail(email, fullName, pkg, foundSubjects.map(s => s.name).join(", "), startDate || "N/A", finishDate || "N/A", studyDuration || "3 months");
+      await sendWelcomeEmail(
+        email,
+        fullName,
+        pkg,
+        foundSubjects.map(s => s.name).join(", "),
+        startDate || "N/A",
+        finishDate || "N/A",
+        studyDuration || "3 months"
+      );
     } catch (err) {
       console.error("❌ Error sending welcome email:", err);
     }
@@ -68,7 +98,8 @@ router.post("/login", async (req, res) => {
     const student = await Student.findOne({ email });
     if (!student) return res.status(404).json({ message: "User not found. Please sign up." });
 
-    if (!(await bcrypt.compare(password, student.password))) return res.status(400).json({ message: "Invalid email or password" });
+    if (!(await bcrypt.compare(password, student.password))) 
+      return res.status(400).json({ message: "Invalid email or password" });
 
     const token = jwt.sign({ id: student._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
     res.json({ message: "Login successful", user: student, token });
@@ -82,7 +113,9 @@ router.post("/login", async (req, res) => {
 /* ==================== CURRENT STUDENT ==================== */
 router.get("/me", studentAuth, async (req, res) => {
   try {
-    const student = await Student.findById(req.user._id).populate("subjectsEnrolled", "name package grade price").select("-password");
+    const student = await Student.findById(req.user._id)
+      .populate("subjectsEnrolled", "name package grade price")
+      .select("-password");
     const payments = await Payment.find({ studentId: student._id }).sort({ createdAt: -1 });
     res.json({ user: student, subjects: student.subjectsEnrolled, payments });
   } catch (err) {
@@ -92,11 +125,13 @@ router.get("/me", studentAuth, async (req, res) => {
 });
 
 /* ==================== STUDENT SUBJECTS ==================== */
-router.get("/:studentId/subjects", async (req, res) => {
+// ✅ FIXED ROUTE: subjects come after studentId
+router.get("/subjects/:studentId", async (req, res) => {
   try {
-    const student = await Student.findById(req.params.studentId).populate("subjectsEnrolled", "name package grade price");
+    const { studentId } = req.params;
+    const student = await Student.findById(studentId).populate("subjectsEnrolled", "name package grade price");
     if (!student) return res.status(404).json({ message: "Student not found" });
-    res.json(student.subjectsEnrolled);
+    res.json({ success: true, subjects: student.subjectsEnrolled });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server error fetching subjects" });
