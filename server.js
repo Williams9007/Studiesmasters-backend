@@ -20,11 +20,9 @@ import studentRoutes from "./routes/studentRoutes.js";
 import teacherRoutes from "./routes/teacherRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
+import subjectRoutes from "./routes/subjectRoutes.js"; // ✅ Added subjects route
 import { setSocketIO as setAdminSocket } from "./routes/adminRoutes.js";
 import { setSocketIO as setBroadcastSocket } from "./Controllers/broadcastController.js";
-
-
-
 
 // ==========================
 // VALIDATE ENV VARIABLES
@@ -86,7 +84,9 @@ app.use("/api/students", studentRoutes);
 app.use("/api/teachers", teacherRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/subjects", subjectRoutes); // ✅ Mounted subjects route
 
+// Root route
 app.get("/", (req, res) => {
   res.send("🚀 EduConnect API is running");
 });
@@ -102,11 +102,9 @@ const io = new Server(httpServer, {
 });
 
 // Make io available in routes
-// Make io available everywhere
 setAdminSocket(io);
 setBroadcastSocket(io);
 app.set("io", io);
-
 
 // ==========================
 // ONLINE USERS MAP
