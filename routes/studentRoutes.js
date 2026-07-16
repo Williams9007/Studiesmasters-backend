@@ -12,87 +12,147 @@ import Broadcast from "../models/Broadcast.js";
 import Assignment from "../models/Assignment.js";
 import { sendWelcomeEmail } from "../message/sendWelcomeEmail.js";
 import { studentAuth } from "../middleware/studentAuth.js";
+import { verifyTurnstile } from "../middleware/verifyTurnstile.js";
+import { curriculumCatalog } from "../data/curriculumCatalog.js";
 
 dotenv.config();
 const router = express.Router();
 
+router.get("/catalog", (req, res) => res.json(curriculumCatalog));
+
 /* ==================== REGISTER STUDENT ==================== */
 router.post("/register", async (req, res) => {
   try {
-    const { fullName, email, phone, password, curriculum, package: pkg, grade, subjects, totalAmount, startDate, finishDate, studyDuration } = req.body;
+    const { fullName, email, phone, password, curriculum, package: pkg, grade, subjects, selectedPlan = "", totalAmount, startDate, finishDate, studyDuration, preferredDays = [], preferredTime = "" } = req.body;
 
-    const selectedSubjects = Array.isArray(subjects) 
-      ? subjects 
-      : typeof subjects === "string" && subjects.trim() !== "" 
-        ? [subjects] 
-        : [];
+    // Validate input
+    const selectedSubjects = Array.isArray(subjects) ? subjects : typeof subjects === "string" && subjects.trim() !== "" ? [subjects] : [];
+    const catalog = curriculumCatalog[curriculum];
+
+    console.log("[Registration] Starting registration for:", { email, curriculum, grade, pkg, subjectsCount: selectedSubjects.length });
 
     if (!fullName || !email || !phone || !password || !curriculum || !pkg || !grade || selectedSubjects.length === 0) {
       return res.status(400).json({ message: "All required fields must be provided and at least one subject selected." });
     }
+    if (!catalog || !catalog.grades.includes(grade) || selectedSubjects.some((subject) => !catalog.subjects.includes(subject))) {
+      return res.status(400).json({ message: "Select a valid curriculum, grade, and subject." });
+    }
 
-    if (await Student.findOne({ email })) {
+    const validLearningDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    if (!Array.isArray(preferredDays)) {
+      return res.status(400).json({ message: "Students must select exactly 3 valid learning days each week." });
+    }
+    const uniquePreferredDays = [...new Set(preferredDays)];
+    if (preferredDays.length !== 3 || uniquePreferredDays.length !== 3 || uniquePreferredDays.some((day) => !validLearningDays.includes(day))) {
+      return res.status(400).json({ message: "Students must select exactly 3 valid learning days each week." });
+    }
+
+    // Check if email already exists
+    const existingStudent = await Student.findOne({ email });
+    if (existingStudent) {
       return res.status(400).json({ message: "Email already registered" });
     }
 
-    const foundSubjects = await Subject.find({ _id: { $in: selectedSubjects } });
-    if (!foundSubjects.length) return res.status(400).json({ message: "No matching subjects found." });
+    // Create or find subjects with proper error handling
+    console.log("[Registration] Creating/finding subjects:", selectedSubjects);
+    const foundSubjects = await Promise.all(selectedSubjects.map(async (name) => {
+      try {
+        const subject = await Subject.findOneAndUpdate(
+          { name, curriculum: curriculum || "", grade, package: pkg },
+          { $setOnInsert: { name, curriculum: curriculum || "", grade, package: pkg, price: 0 } },
+          { new: true, upsert: true }
+        );
+        return subject;
+      } catch (subjErr) {
+        console.error(`[Registration] Error processing subject '${name}':`, subjErr.message);
+        throw new Error(`Failed to process subject '${name}': ${subjErr.message}`);
+      }
+    }));
 
-    const invalidSubjects = foundSubjects.filter(s => 
-      (s.package || "").trim().toUpperCase() !== (pkg || "").trim().toUpperCase() || 
-      (s.grade || "").trim().toUpperCase() !== (grade || "").trim().toUpperCase()
-    );
-    if (invalidSubjects.length > 0) return res.status(400).json({ message: "Some subjects do not match package/grade." });
+    // Check if any subject upsert failed
+    if (foundSubjects.some((s) => !s)) {
+      console.error("[Registration] One or more subjects are null after upsert");
+      return res.status(500).json({ message: "Failed to create or find subjects. Please try again." });
+    }
 
+    // Hash password
+    console.log("[Registration] Hashing password...");
     const hashedPassword = await bcrypt.hash(password, await bcrypt.genSalt(10));
 
+    // Create student document (only include fields that have values)
     const student = new Student({
-      fullName,
-      email,
-      phone,
-      password: hashedPassword,
-      curriculum,
-      package: pkg,
-      grade,
+      fullName, email, phone, password: hashedPassword,
+      curriculum, package: pkg, selectedPlan, grade,
       subjectsEnrolled: foundSubjects.map(s => s._id),
-      totalAmount,
-      startDate,
-      finishDate,
-      studyDuration
+      subjectNames: selectedSubjects,
+      totalAmount: totalAmount || 0,
+      startDate: startDate || null,
+      finishDate: finishDate || null,
+      studyDuration: studyDuration || "",
+      preferredDays: uniquePreferredDays,
+      preferredTime: preferredTime || ""
     });
 
+    console.log("[Registration] Saving student to database...");
     await student.save();
+    console.log("[Registration] Student saved successfully:", student._id);
 
-    await Subject.updateMany(
-      { _id: { $in: foundSubjects.map(s => s._id) } }, 
-      { $push: { enrolledStudents: student._id } }
-    );
+    // Fire-and-forget email: do NOT await it so it never blocks the registration response
+    sendWelcomeEmail(email, fullName, pkg, foundSubjects.map(s => s.name).join(", "), startDate || "N/A", finishDate || "N/A", studyDuration || "3 months")
+      .catch((emailErr) => console.error("❌ Error sending welcome email (non-blocking):", emailErr));
 
-    try {
-      await sendWelcomeEmail(
-        email,
-        fullName,
-        pkg,
-        foundSubjects.map(s => s.name).join(", "),
-        startDate || "N/A",
-        finishDate || "N/A",
-        studyDuration || "3 months"
-      );
-    } catch (err) {
-      console.error("❌ Error sending welcome email:", err);
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({ message: "Server configuration error (JWT secret not set)" });
     }
 
     const token = jwt.sign({ id: student._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
+    console.log("[Registration] Student registration completed successfully");
     res.status(201).json({ message: "✅ Student registered successfully", user: student, token });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Server error during student signup" });
+    console.error("❌ [Registration] Student registration error:", {
+      message: err.message,
+      name: err.name,
+      code: err.code,
+      stack: err.stack
+    });
+    
+    if (err?.code === 11000) {
+      return res.status(400).json({ message: "An account with this email already exists." });
+    }
+    if (err?.name === "ValidationError") {
+      return res.status(400).json({ message: `Validation error: ${err.message}` });
+    }
+    if (err?.name === "CastError") {
+      return res.status(400).json({ message: `Invalid data format: ${err.message}` });
+    }
+    
+    res.status(500).json({
+      message: "Server error during student signup",
+      error: process.env.NODE_ENV === "development" ? err.message : undefined
+    });
+  }
+});
+
+router.get("/:studentId/payment-summary", async (req, res) => {
+  try {
+    const student = await Student.findById(req.params.studentId)
+      .populate("subjectsEnrolled", "name subjectName")
+      .select("fullName email phone curriculum package selectedPlan grade subjectsEnrolled preferredDays preferredTime");
+    if (!student) return res.status(404).json({ message: "Student not found" });
+    res.json({ student: {
+      id: student._id, fullName: student.fullName, email: student.email, phone: student.phone,
+      curriculum: student.curriculum, package: student.selectedPlan || student.package, grade: student.grade,
+      subjects: student.subjectsEnrolled.map((subject) => subject.name || subject.subjectName),
+      preferredDays: student.preferredDays, preferredTime: student.preferredTime,
+    } });
+  } catch (err) {
+    res.status(500).json({ message: "Unable to load payment details" });
   }
 });
 
 /* ==================== LOGIN STUDENT ==================== */
-router.post("/login", async (req, res) => {
+router.post("/login", verifyTurnstile, async (req, res) => {
   try {
     const { email, password } = req.body;
     const student = await Student.findOne({ email });
