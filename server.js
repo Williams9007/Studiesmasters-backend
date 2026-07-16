@@ -21,7 +21,7 @@ import teacherRoutes from "./routes/teacherRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
 import adminRoutes, { setSocketIO as setAdminSocket } from "./routes/adminRoutes.js";
 import subjectRoutes from "./routes/subjectRoutes.js";
-import { setSocketIO as setBroadcastSocket } from "./controllers/broadcasting.js";
+import { setSocketIO as setBroadcastSocket } from "./Controllers/broadcasting.js";
 
 // ==========================
 // VALIDATE ENV VARIABLES
