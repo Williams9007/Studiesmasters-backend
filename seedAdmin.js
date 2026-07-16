@@ -1,39 +1,32 @@
-// backend/seedAdmin.js
+// example seed script
 import mongoose from "mongoose";
-import bcrypt from "bcryptjs";
+import bcrypt from "bcrypt";
 import dotenv from "dotenv";
 import Admin from "./models/admin.js";
 
 dotenv.config();
 
 const seedAdmin = async () => {
-  try {
-    await mongoose.connect(process.env.MONGO_URI);
-    console.log("✅ Connected to MongoDB");
+  await mongoose.connect(process.env.MONGO_URI);
 
-    const hashedPassword = await bcrypt.hash("admin123", 10);
-
-    // Clear existing admins to prevent duplicates
-    await Admin.deleteMany({});
-
-    await Admin.create({
-      fullName: "Super Admin",
-      email: "admin@educonnect.com",
-      password: hashedPassword,
-      role: "Admin",
-      adminCode: "EDU-ADMIN-001", // ✅ Required field
-    });
-
-    console.log("✅ Admin account created successfully!");
-    console.log("📧 Email: admin@educonnect.com");
-    console.log("🔑 Password: admin123");
-    console.log("🪪 Admin Code: EDU-ADMIN-001");
-
-    process.exit();
-  } catch (err) {
-    console.error("❌ Error seeding admin:", err);
-    process.exit(1);
+  const existing = await Admin.findOne({ email: "Benedictamensahkwei@gmail.com" });
+  if (existing) {
+    console.log("Admin already exists");
+    process.exit(0);
   }
+
+  const hashedPassword = await bcrypt.hash("Admin@123", 10);
+
+  await Admin.create({
+    fullName: "Super Admin",
+    email: "Benedictamensahkwei@gmail.com",
+    password: hashedPassword,
+    role: "MAIN_ADMIN",
+    adminCode: "EDU-ADMIN",
+  });
+
+  console.log("✅ Admin seeded successfully");
+  process.exit(0);
 };
 
 seedAdmin();

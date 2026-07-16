@@ -19,11 +19,9 @@ import connectDB from "./config/db.js";
 import studentRoutes from "./routes/studentRoutes.js";
 import teacherRoutes from "./routes/teacherRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
-import adminRoutes from "./routes/adminRoutes.js";
-import { setSocketIO as setAdminSocket } from "./routes/adminRoutes.js";
-import { setSocketIO as setBroadcastSocket } from "./controllers/broadcastController.js";
-
-
+import adminRoutes, { setSocketIO as setAdminSocket } from "./routes/adminRoutes.js";
+import subjectRoutes from "./routes/subjectRoutes.js";
+import { setSocketIO as setBroadcastSocket } from "./controllers/broadcasting.js";
 
 // ==========================
 // VALIDATE ENV VARIABLES
@@ -85,9 +83,10 @@ app.use("/api/students", studentRoutes);
 app.use("/api/teachers", teacherRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/subjects", subjectRoutes);
 
 app.get("/", (req, res) => {
-  res.send("🚀 EduConnect API is running");
+  res.send("🚀 Studiesmasters API is running");
 });
 
 // ==========================
@@ -100,12 +99,10 @@ const io = new Server(httpServer, {
   },
 });
 
-// Make io available in routes
-// Make io available everywhere
+// Make io available in routes/controllers
 setAdminSocket(io);
 setBroadcastSocket(io);
 app.set("io", io);
-
 
 // ==========================
 // ONLINE USERS MAP
@@ -149,7 +146,33 @@ app.use((err, req, res, next) => {
 // ==========================
 // START SERVER ONLY AFTER DB CONNECTS
 // ==========================
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT
+  ? isNaN(Number(process.env.PORT))
+    ? process.env.PORT
+    : Number(process.env.PORT)
+  : 5000;
+
+const onListenError = (error) => {
+  if (error.syscall !== "listen") {
+    throw error;
+  }
+
+  const bind = typeof PORT === "string" ? `Pipe ${PORT}` : `Port ${PORT}`;
+  switch (error.code) {
+    case "EACCES":
+      console.error(`❌ ${bind} requires elevated privileges`);
+      process.exit(1);
+      break;
+    case "EADDRINUSE":
+      console.error(`❌ ${bind} is already in use`);
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+};
+
+httpServer.on("error", onListenError);
 
 const startServer = async () => {
   try {

@@ -7,15 +7,19 @@ const assignmentSchema = new mongoose.Schema({
     required: true
   },
   description: { type: String },
-  teacherId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true }, // teacher who created it
-  students: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], // students assigned
+  teacherId: { type: mongoose.Schema.Types.ObjectId, ref: "Teacher", required: true },
+  classGroup: { type: mongoose.Schema.Types.ObjectId, ref: "ClassGroup", default: null },
+  students: [{ type: mongoose.Schema.Types.ObjectId, ref: "Student" }],
   submissions: [
     {
-      studentId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      studentId: { type: mongoose.Schema.Types.ObjectId, ref: "Student" },
       submissionText: { type: String },
       fileUrl: { type: String }, // optional file attachment
       submittedAt: { type: Date, default: Date.now },
-      status: { type: String, enum: ["pending", "submitted", "overdue"], default: "pending" }
+      status: { type: String, enum: ["pending", "submitted", "reviewed", "overdue"], default: "pending" },
+      score: { type: Number, min: 0, max: 100 },
+      feedback: { type: String, trim: true },
+      reviewedAt: { type: Date },
     }
   ],
   dueDate: { type: Date, required: true },

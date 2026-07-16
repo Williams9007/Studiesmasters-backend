@@ -39,7 +39,7 @@ const paymentSchema = new mongoose.Schema(
 
     screenshot: {
       type: String, // use either file path or URL
-      required: true,
+      default: "",
     },
 
     amount: {
@@ -61,6 +61,18 @@ const paymentSchema = new mongoose.Schema(
       type: String,
       enum: ["pending", "confirmed", "rejected"],
       default: "pending",
+    },
+
+    paymentProvider: {
+      type: String,
+      enum: ["manual", "paystack"],
+      default: "manual",
+    },
+
+    paystackReference: {
+      type: String,
+      sparse: true,
+      unique: true,
     },
 
     reviewedBy: {

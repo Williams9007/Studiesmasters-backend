@@ -1,7 +1,7 @@
 import express from "express";
 import Message from "../models/Message.js";
 import MessageRecipient from "../models/MessageRecipient.js";
-import User from "../models/user.js";
+import User from "../models/Users.js";
 import { verifyAuth } from "../middleware/verifyAuth.js"; 
 // verifyAuth should attach req.user
 

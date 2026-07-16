@@ -32,6 +32,154 @@ const calculateExpiry = (startDate, durationStr) => {
   return expiry;
 };
 
+const enrollStudent = async ({ studentId, curriculum, pkg, grade, subjectsArray }) => {
+  const enrollResults = [];
+  for (const subject of subjectsArray) {
+    const alreadyEnrolled = await ClassEnrollment.findOne({ studentId, curriculum, package: pkg, grade, subject });
+    if (alreadyEnrolled) {
+      enrollResults.push({ subject, status: "exists" });
+      continue;
+    }
+    await ClassEnrollment.create({ studentId, curriculum, package: pkg, grade, subject });
+    enrollResults.push({ subject, status: "enrolled" });
+  }
+  return enrollResults;
+};
+
+const paystackRequest = async (path, options = {}) => {
+  if (!process.env.PAYSTACK_SECRET_KEY) {
+    throw new Error("Paystack is not configured. Add PAYSTACK_SECRET_KEY to the server environment.");
+  }
+
+  const response = await fetch(`https://api.paystack.co${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+      "Content-Type": "application/json",
+      ...options.headers,
+    },
+  });
+  const body = await response.json();
+  if (!response.ok || !body.status) throw new Error(body.message || "Paystack request failed");
+  return body.data;
+};
+
+// ==================== Paystack Checkout ====================
+router.post("/paystack/initialize", async (req, res) => {
+  try {
+    const {
+      studentId,
+      studentName,
+      email,
+      phone,
+      curriculum,
+      package: pkg,
+      grade = "",
+      subjects,
+      amount,
+      duration = "1 month",
+      callbackUrl,
+      callback_url: callbackUrlFromBody,
+      channels,
+      metadata = {},
+      paymentMethod,
+    } = req.body;
+    const subjectsArray = Array.isArray(subjects) ? subjects : String(subjects || "").split(",").map((subject) => subject.trim()).filter(Boolean);
+    const amountInPesewas = Math.round(Number(amount) * 100);
+    const selectedCallbackUrl = callbackUrl || callbackUrlFromBody || `${process.env.FRONTEND_URL || "http://localhost:5173"}/payment`;
+    const normalizedChannels = Array.isArray(channels) && channels.length
+      ? channels
+      : paymentMethod === "card"
+        ? ["card"]
+        : ["mobile_money"];
+
+    if (!studentId || !studentName || !email || !curriculum || !pkg || !subjectsArray.length || amountInPesewas <= 0) {
+      return res.status(400).json({ message: "Complete student, plan, subject, and amount details before paying." });
+    }
+
+    const reference = `SM-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    const transaction = new Date();
+    const payment = await Payment.create({
+      studentId: new mongoose.Types.ObjectId(studentId),
+      studentName,
+      curriculum,
+      package: pkg,
+      grade,
+      subjects: subjectsArray,
+      amount: Number(amount),
+      referenceName: reference,
+      paystackReference: reference,
+      paymentProvider: "paystack",
+      transactionDate: transaction,
+      duration,
+      status: "pending",
+    });
+
+    const checkout = await paystackRequest("/transaction/initialize", {
+      method: "POST",
+      body: JSON.stringify({
+        email,
+        amount: amountInPesewas,
+        currency: "GHS",
+        reference,
+        channels: normalizedChannels,
+        callback_url: selectedCallbackUrl,
+        label: "Studiesmasters Learning",
+        metadata: {
+          paymentId: payment._id.toString(),
+          studentId,
+          phone,
+          package: pkg,
+          studentName,
+          customerName: studentName,
+          ...metadata,
+        },
+      }),
+    });
+
+    res.status(201).json({
+      authorizationUrl: checkout.authorization_url,
+      reference,
+      publicKey: process.env.PAYSTACK_PUBLIC_KEY || "",
+      public_key: process.env.PAYSTACK_PUBLIC_KEY || "",
+    });
+  } catch (err) {
+    console.error("Paystack initialization error:", err);
+    res.status(500).json({ message: err.message || "Unable to start Paystack checkout." });
+  }
+});
+
+router.post("/paystack/verify/:reference", async (req, res) => {
+  try {
+    const { reference } = req.params;
+    const payment = await Payment.findOne({ paystackReference: reference });
+    if (!payment) return res.status(404).json({ message: "Payment record not found." });
+    if (payment.status === "confirmed") return res.json({ message: "Payment already confirmed.", payment });
+
+    const transaction = await paystackRequest(`/transaction/verify/${encodeURIComponent(reference)}`);
+    const expectedAmount = Math.round(Number(payment.amount) * 100);
+    if (transaction.status !== "success" || transaction.currency !== "GHS" || transaction.amount !== expectedAmount) {
+      return res.status(400).json({ message: "Paystack could not confirm the payment amount." });
+    }
+
+    payment.status = "confirmed";
+    payment.transactionDate = new Date(transaction.paid_at || Date.now());
+    await payment.save();
+    const enrollmentSummary = await enrollStudent({
+      studentId: payment.studentId,
+      curriculum: payment.curriculum,
+      pkg: payment.package,
+      grade: payment.grade,
+      subjectsArray: payment.subjects,
+    });
+    await Student.findByIdAndUpdate(payment.studentId, { $addToSet: { payments: payment._id } });
+    res.json({ message: "Payment confirmed and enrollment processed.", payment, enrollmentSummary });
+  } catch (err) {
+    console.error("Paystack verification error:", err);
+    res.status(500).json({ message: err.message || "Unable to verify Paystack payment." });
+  }
+});
+
 // ==================== Submit Payment ====================
 router.post("/submit", upload.single("screenshot"), async (req, res) => {
   try {
@@ -78,16 +226,7 @@ router.post("/submit", upload.single("screenshot"), async (req, res) => {
     });
 
     // ✅ Auto-enroll student into subjects
-    const enrollResults = [];
-    for (const subject of subjectsArray) {
-      const alreadyEnrolled = await ClassEnrollment.findOne({ studentId, curriculum, package: pkg, grade, subject });
-      if (alreadyEnrolled) {
-        enrollResults.push({ subject, status: "exists" });
-        continue;
-      }
-      await ClassEnrollment.create({ studentId, curriculum, package: pkg, grade, subject });
-      enrollResults.push({ subject, status: "enrolled" });
-    }
+    const enrollResults = await enrollStudent({ studentId, curriculum, pkg, grade, subjectsArray });
 
     // ✅ Update Student's payments array
     await Student.findByIdAndUpdate(studentId, { $push: { payments: payment._id } });

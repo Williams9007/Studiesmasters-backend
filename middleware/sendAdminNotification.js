@@ -7,7 +7,7 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 export async function sendAdminNotification(subject, message) {
   try {
     const email = await resend.emails.send({
-      from: "EduConnect Admin <onboarding@resend.dev>",
+      from: "Studiesmasters Admin <onboarding@resend.dev>",
       to: process.env.ADMIN_EMAIL, // your admin email
       subject,
       html: `
@@ -15,7 +15,7 @@ export async function sendAdminNotification(subject, message) {
           <h2>📢 ${subject}</h2>
           <p>${message}</p>
           <br/>
-          <p>– EduConnect System Notification</p>
+          <p>– Studiesmasters System Notification</p>
         </div>
       `,
     });

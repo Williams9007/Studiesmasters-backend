@@ -5,7 +5,18 @@ const broadcastSchema = new mongoose.Schema(
     sender: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Admin",
-      required: true,
+    },
+
+    // Teacher-originated broadcasts use these fields; admin broadcasts continue
+    // to use `sender`, `type`, and `recipients` above.
+    teacher: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Teacher",
+    },
+
+    subjectId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Subject",
     },
 
     type: {
