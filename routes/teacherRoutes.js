@@ -5,8 +5,7 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import nodemailer from "nodemailer";
 
-// Models (Ensure casing matches your actual filenames exactly, e.g., Teacher.js not teacher.js)
-import Teacher from "../models/Teacher.js";
+import Teacher from "../models/teacher.js";
 import Assignment from "../models/Assignment.js";
 import Student from "../models/Student.js";
 import Subject from "../models/Subject.js";
