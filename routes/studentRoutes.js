@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import multer from "multer";
 import path from "path";
+import crypto from "crypto";
 
 import Student from "../models/Student.js";
 import Payment from "../models/Payment.js";
@@ -23,7 +24,7 @@ router.get("/catalog", (req, res) => res.json(curriculumCatalog));
 /* ==================== REGISTER STUDENT ==================== */
 router.post("/register", async (req, res) => {
   try {
-    const { fullName, email, phone, password, curriculum, package: pkg, grade, subjects, selectedPlan = "", totalAmount, startDate, finishDate, studyDuration, preferredDays = [], preferredTime = "" } = req.body;
+    const { fullName, email, phone, curriculum, package: pkg, grade, subjects, selectedPlan = "", totalAmount, startDate, finishDate, studyDuration, preferredDays = [], preferredTime = "" } = req.body;
 
     // Validate input
     const selectedSubjects = Array.isArray(subjects) ? subjects : typeof subjects === "string" && subjects.trim() !== "" ? [subjects] : [];
@@ -31,7 +32,7 @@ router.post("/register", async (req, res) => {
     
     console.log("[Registration] Starting registration for:", { email, curriculum, grade, pkg, subjectsCount: selectedSubjects.length });
 
-    if (!fullName || !email || !phone || !password || !curriculum || !pkg || !grade || selectedSubjects.length === 0) {
+    if (!fullName || !email || !phone || !curriculum || !pkg || !grade || selectedSubjects.length === 0) {
       return res.status(400).json({ message: "All required fields must be provided and at least one subject selected." });
     }
     if (!catalog || !catalog.grades.includes(grade) || selectedSubjects.some((subject) => !catalog.subjects.includes(subject))) {
@@ -75,9 +76,9 @@ router.post("/register", async (req, res) => {
       return res.status(500).json({ message: "Failed to create or find subjects. Please try again." });
     }
 
-    // Hash password
+    const temporaryPassword = `SM-${crypto.randomBytes(9).toString("base64url")}`;
     console.log("[Registration] Hashing password...");
-    const hashedPassword = await bcrypt.hash(password, await bcrypt.genSalt(10));
+    const hashedPassword = await bcrypt.hash(temporaryPassword, await bcrypt.genSalt(10));
 
     // Create student document (only include fields that have values)
     const student = new Student({
@@ -97,9 +98,32 @@ router.post("/register", async (req, res) => {
     await student.save();
     console.log("[Registration] Student saved successfully:", student._id);
 
-    // Fire-and-forget email: do NOT await it so it never blocks the registration response
-    sendWelcomeEmail(email, fullName, pkg, foundSubjects.map(s => s.name).join(", "), startDate || "N/A", finishDate || "N/A", studyDuration || "3 months")
-      .catch((emailErr) => console.error("❌ Error sending welcome email (non-blocking):", emailErr));
+    // Wait for Resend to acknowledge the request before returning the response.
+    let welcomeEmail = { sent: false };
+    try {
+      const emailData = await sendWelcomeEmail(
+      email,
+      fullName,
+      pkg,
+      foundSubjects.map(s => s.name).join(", "),
+      startDate || "N/A",
+      finishDate || "N/A",
+      studyDuration || "3 months",
+      temporaryPassword,
+      phone,
+      curriculum,
+      grade,
+      uniquePreferredDays.join(", "),
+      preferredTime
+      );
+      welcomeEmail = { sent: true, id: emailData?.id };
+    } catch (emailErr) {
+      console.error("Welcome email failed after student registration:", {
+        studentId: student._id.toString(),
+        email,
+        message: emailErr.message,
+      });
+    }
 
     if (!process.env.JWT_SECRET) {
       return res.status(500).json({ message: "Server configuration error (JWT secret not set)" });
@@ -107,7 +131,12 @@ router.post("/register", async (req, res) => {
 
     const token = jwt.sign({ id: student._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
     console.log("[Registration] Student registration completed successfully");
-    res.status(201).json({ message: "✅ Student registered successfully", user: student, token });
+    res.status(201).json({
+      message: "✅ Student registered successfully",
+      user: student,
+      token,
+      welcomeEmail,
+    });
 
   } catch (err) {
     console.error("❌ [Registration] Student registration error:", {
