@@ -6,14 +6,19 @@ const TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/sit
  */
 export async function verifyTurnstile(req, res, next) {
   const token = req.body?.cfTurnstileToken;
-  const secret = process.env.TURNSTILE_SECRET_KEY;
+  const secret = process.env.TURNSTILE_SECRET;
+
+  // Allow bypass in development when no token is provided (for local testing)
+  if (process.env.NODE_ENV !== "production" && !token) {
+    return next();
+  }
 
   if (!token) {
     return res.status(400).json({ message: "Please complete the CAPTCHA verification." });
   }
 
   if (!secret) {
-    console.error("TURNSTILE_SECRET_KEY is not configured.");
+    console.error("TURNSTILE_SECRET is not configured.");
     return res.status(500).json({ message: "CAPTCHA verification is not configured." });
   }
 

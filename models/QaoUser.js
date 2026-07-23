@@ -6,7 +6,10 @@ const QaoUserSchema = new mongoose.Schema(
 
     email: { type: String, required: true, unique: true },
 
-    password: { type: String, required: true }, // ✅ ADD THIS
+    password: { type: String, required: true },
+
+    // Unique public identifier for QAO users
+    userId: { type: String, required: true, unique: true, immutable: true, index: true },
 
     role: {
       type: String,

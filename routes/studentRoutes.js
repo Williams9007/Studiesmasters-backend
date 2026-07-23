@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import multer from "multer";
 import path from "path";
 import crypto from "crypto";
+import rateLimit from "express-rate-limit";
 
 import Student from "../models/Student.js";
 import Payment from "../models/Payment.js";
@@ -15,16 +16,84 @@ import { sendWelcomeEmail } from "../message/sendWelcomeEmail.js";
 import { studentAuth } from "../middleware/studentAuth.js";
 import { verifyTurnstile } from "../middleware/verifyTurnstile.js";
 import { curriculumCatalog } from "../data/curriculumCatalog.js";
+import { createPasswordResetToken, hashPasswordResetToken, sendPasswordResetEmail } from "../utils/passwordReset.js";
 
 dotenv.config();
 const router = express.Router();
 
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { message: "Too many attempts, please try again after 15 minutes" },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const createUserId = () =>
+  `SM-ST-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+
 router.get("/catalog", (req, res) => res.json(curriculumCatalog));
+
+// A reset link is deliberately required before a password can be changed.
+router.post("/forget-password", async (req, res) => {
+  try {
+    const email = req.body.email?.trim().toLowerCase();
+    if (!email) return res.status(400).json({ message: "Email is required" });
+
+    const student = await Student.findOne({ email });
+    // Do not disclose whether an email address has an account.
+    if (!student) return res.json({ message: "If that email has an account, a confirmation link has been sent." });
+
+    const token = createPasswordResetToken(student);
+    await student.save({ validateBeforeSave: false });
+    await sendPasswordResetEmail({ email: student.email, name: student.fullName, token, requestType: "reset your password", role: "student" });
+    res.json({ message: "Check your email for a link to confirm your password reset." });
+  } catch (err) {
+    console.error("Student password-reset request error:", err);
+    res.status(500).json({ message: "Unable to send the confirmation email" });
+  }
+});
+
+router.post("/reset-password/:token", async (req, res) => {
+  try {
+    const { newPassword } = req.body;
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ message: "Password must be at least 6 characters" });
+    }
+    const student = await Student.findOne({
+      resetToken: hashPasswordResetToken(req.params.token),
+      resetTokenExpiry: { $gt: new Date() },
+    });
+    if (!student) return res.status(400).json({ message: "This confirmation link is invalid or has expired" });
+
+    student.password = await bcrypt.hash(newPassword, 10);
+    student.resetToken = undefined;
+    student.resetTokenExpiry = undefined;
+    await student.save();
+    res.json({ message: "Password updated successfully. You can now log in." });
+  } catch (err) {
+    console.error("Student password reset error:", err);
+    res.status(500).json({ message: "Unable to update password" });
+  }
+});
+
+router.post("/change-password/request", studentAuth, async (req, res) => {
+  try {
+    const student = await Student.findById(req.user._id);
+    const token = createPasswordResetToken(student);
+    await student.save({ validateBeforeSave: false });
+    await sendPasswordResetEmail({ email: student.email, name: student.fullName, token, requestType: "change your password", role: "student" });
+    res.json({ message: "Check your email to confirm the password change." });
+  } catch (err) {
+    console.error("Student password-change request error:", err);
+    res.status(500).json({ message: "Unable to send the confirmation email" });
+  }
+});
 
 /* ==================== REGISTER STUDENT ==================== */
 router.post("/register", async (req, res) => {
   try {
-    const { fullName, email, phone, curriculum, package: pkg, grade, subjects, selectedPlan = "", totalAmount, startDate, finishDate, studyDuration, preferredDays = [], preferredTime = "" } = req.body;
+    const { fullName, email, phone, curriculum, package: pkg, grade, subjects, selectedPlan = "", totalAmount, startDate, finishDate, studyDuration, preferredDays = [], preferredTime = "", policyAcceptance = {} } = req.body;
 
     // Validate input
     const selectedSubjects = Array.isArray(subjects) ? subjects : typeof subjects === "string" && subjects.trim() !== "" ? [subjects] : [];
@@ -34,6 +103,9 @@ router.post("/register", async (req, res) => {
 
     if (!fullName || !email || !phone || !curriculum || !pkg || !grade || selectedSubjects.length === 0) {
       return res.status(400).json({ message: "All required fields must be provided and at least one subject selected." });
+    }
+    if (!policyAcceptance.terms || !policyAcceptance.privacy || !policyAcceptance.parentAgreement) {
+      return res.status(400).json({ message: "You must accept the Terms & Conditions, Privacy Policy, and Parent Service Agreement to continue." });
     }
     if (!catalog || !catalog.grades.includes(grade) || selectedSubjects.some((subject) => !catalog.subjects.includes(subject))) {
       return res.status(400).json({ message: "Select a valid curriculum, grade, and subject." });
@@ -82,7 +154,7 @@ router.post("/register", async (req, res) => {
 
     // Create student document (only include fields that have values)
     const student = new Student({
-      fullName, email, phone, password: hashedPassword,
+      fullName, email, phone, password: hashedPassword, userId: createUserId(),
       curriculum, package: pkg, selectedPlan, grade,
       subjectsEnrolled: foundSubjects.map(s => s._id),
       subjectNames: selectedSubjects,
@@ -91,7 +163,13 @@ router.post("/register", async (req, res) => {
       finishDate: finishDate || null,
       studyDuration: studyDuration || "",
       preferredDays: uniquePreferredDays,
-      preferredTime: preferredTime || ""
+      preferredTime: preferredTime || "",
+      policyAcceptance: {
+        terms: true,
+        privacy: true,
+        parentAgreement: true,
+        acceptedAt: new Date(),
+      },
     });
 
     console.log("[Registration] Saving student to database...");
@@ -101,21 +179,21 @@ router.post("/register", async (req, res) => {
     // Wait for Resend to acknowledge the request before returning the response.
     let welcomeEmail = { sent: false };
     try {
-      const emailData = await sendWelcomeEmail(
-      email,
-      fullName,
-      pkg,
-      foundSubjects.map(s => s.name).join(", "),
-      startDate || "N/A",
-      finishDate || "N/A",
-      studyDuration || "3 months",
-      temporaryPassword,
-      phone,
-      curriculum,
-      grade,
-      uniquePreferredDays.join(", "),
-      preferredTime
-      );
+      const emailData = await sendWelcomeEmail({
+        userEmail: email,
+        studentName: fullName,
+        // The auth form's selected plan is the customer-facing package name.
+        // Keep `pkg` as a fallback for older clients that do not send it.
+        packageName: selectedPlan || pkg,
+        subjects: foundSubjects.map(s => s.name).join(", "),
+        temporaryPassword,
+        userId: student.userId,
+        phone,
+        curriculum,
+        grade,
+        preferredDays: uniquePreferredDays.join(", "),
+        preferredTime,
+      });
       welcomeEmail = { sent: true, id: emailData?.id };
     } catch (emailErr) {
       console.error("Welcome email failed after student registration:", {
@@ -167,10 +245,10 @@ router.get("/:studentId/payment-summary", async (req, res) => {
   try {
     const student = await Student.findById(req.params.studentId)
       .populate("subjectsEnrolled", "name subjectName")
-      .select("fullName email phone curriculum package selectedPlan grade subjectsEnrolled preferredDays preferredTime");
+      .select("fullName userId email phone curriculum package selectedPlan grade subjectsEnrolled preferredDays preferredTime");
     if (!student) return res.status(404).json({ message: "Student not found" });
     res.json({ student: {
-      id: student._id, fullName: student.fullName, email: student.email, phone: student.phone,
+      id: student._id, userId: student.userId, fullName: student.fullName, email: student.email, phone: student.phone,
       curriculum: student.curriculum, package: student.selectedPlan || student.package, grade: student.grade,
       subjects: student.subjectsEnrolled.map((subject) => subject.name || subject.subjectName),
       preferredDays: student.preferredDays, preferredTime: student.preferredTime,
@@ -181,10 +259,14 @@ router.get("/:studentId/payment-summary", async (req, res) => {
 });
 
 /* ==================== LOGIN STUDENT ==================== */
-router.post("/login", verifyTurnstile, async (req, res) => {
+router.post("/login", verifyTurnstile, authLimiter, async (req, res) => {
   try {
-    const { email, password } = req.body;
-    const student = await Student.findOne({ email });
+    const { loginId, email, password } = req.body;
+    const identifier = (loginId || email || "").trim();
+    if (!identifier || !password) return res.status(400).json({ message: "Email or User ID and password are required" });
+    const student = await Student.findOne({
+      $or: [{ email: identifier.toLowerCase() }, { userId: identifier.toUpperCase() }],
+    });
     if (!student) return res.status(404).json({ message: "User not found. Please sign up." });
 
     if (!(await bcrypt.compare(password, student.password))) return res.status(400).json({ message: "Invalid email or password" });
@@ -269,7 +351,19 @@ const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, "uploads/proofs/"),
   filename: (req, file, cb) => cb(null, file.fieldname + "-" + Date.now() + path.extname(file.originalname))
 });
-const upload = multer({ storage });
+
+const allowedMimeTypes = ["image/jpeg", "image/png", "image/webp", "application/pdf"];
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (!allowedMimeTypes.includes(file.mimetype)) {
+      return cb(new Error("Invalid file type. Only JPG, PNG, WEBP, and PDF are allowed."), false);
+    }
+    cb(null, true);
+  },
+});
 
 router.post("/renew-payment/:studentId", upload.single("proofImage"), async (req, res) => {
   try {

@@ -4,20 +4,27 @@ import { Router } from "express";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import nodemailer from "nodemailer";
-
+import jwt from "jsonwebtoken";
 import Teacher from "../models/teacher.js";
 import Assignment from "../models/Assignment.js";
+import Quiz from "../models/Quiz.js";
 import Student from "../models/Student.js";
 import Subject from "../models/Subject.js";
 import Broadcast from "../models/Broadcast.js";
 import ClassEnrollment from "../models/ClassEnrollment.js";
 import TeacherAssignment from "../models/TeacherAssignment.js";
-
+import ClassGroup from "../models/ClassGroup.js";
 // Middleware
 import { verifyTurnstile } from "../middleware/verifyTurnstile.js";
+import { createPasswordResetToken, hashPasswordResetToken, sendPasswordResetEmail } from "../utils/passwordReset.js";
 
 // Initialize Router ONCE
 const router = express.Router();
+
+const createEmployeeId = (employeeRole) => {
+  const prefix = employeeRole === "tutor_manager" ? "SM-TM" : "SM-TUT";
+  return `${prefix}-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+};
 
 // ==================== TEACHER LIST (Admin) ====================
 router.get("/", async (req, res) => {
@@ -33,32 +40,43 @@ router.get("/", async (req, res) => {
 // ==================== TEACHER LOGIN ====================
 router.post("/login", verifyTurnstile, async (req, res) => {
   try {
-    const { email, password } = req.body;
-    if (!email || !password)
-      return res.status(400).json({ message: "Email and password are required" });
+    const { loginId, email, password } = req.body;
+    const identifier = (loginId || email || "").trim();
+    if (!identifier || !password)
+      return res.status(400).json({ message: "Email or User ID and password are required" });
 
-    const teacher = await Teacher.findOne({ email });
-    if (!teacher)
-      return res.status(404).json({ message: "Teacher not found" });
+    const teacher = await Teacher.findOne({
+      $or: [{ email: identifier.toLowerCase() }, { userId: identifier.toUpperCase() }],
+    });
+
+    // ✅ FIX: Check teacher exists AND has a password hash before bcrypt.compare
+    if (!teacher || !teacher.password)
+      return res.status(401).json({ message: "Invalid credentials" });
 
     const isMatch = await bcrypt.compare(password, teacher.password);
     if (!isMatch)
       return res.status(400).json({ message: "Invalid email or password" });
 
-    // TODO: Replace with actual JWT generation
-    const token = "DUMMY_OR_JWT_TOKEN_HERE"; 
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({ message: "Server configuration error (JWT secret not set)." });
+    }
+
+    const token = jwt.sign({ id: teacher._id, role: "teacher" }, process.env.JWT_SECRET, { expiresIn: "7d" });
+    const user = {
+      _id: teacher._id,
+      fullName: teacher.fullName || teacher.name,
+      email: teacher.email,
+      userId: teacher.userId,
+      curriculum: teacher.curriculum,
+      role: "teacher",
+    };
 
     res.status(200).json({
       success: true,
       message: "Login successful",
       token,
-      data: {
-        _id: teacher._id,
-        fullName: teacher.fullName,
-        email: teacher.email,
-        curriculum: teacher.curriculum,
-        role: "Teacher",
-      },
+      user,
+      data: user,
     });
   } catch (err) {
     console.error("Teacher login error:", err);
@@ -69,22 +87,27 @@ router.post("/login", verifyTurnstile, async (req, res) => {
 // ==================== TEACHER SIGNUP ====================
 router.post("/", async (req, res) => {
   try {
-    const { fullName, email, phone, password, curriculum, experience } = req.body;
+    const { fullName, email, phone, password, curriculum, experience, employeeRole = "tutor" } = req.body;
     if (!fullName || !email || !phone || !password || !curriculum || !experience) {
       return res.status(400).json({ message: "All required fields must be provided" });
     }
-
     const existingTeacher = await Teacher.findOne({ email });
     if (existingTeacher) return res.status(400).json({ message: "Email already registered" });
+    if (!["tutor", "tutor_manager"].includes(employeeRole)) {
+      return res.status(400).json({ message: "Employee role must be tutor or tutor_manager" });
+    }
 
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
     const teacher = await Teacher.create({
+      name: fullName,
       fullName,
       email,
       phone,
       password: hashedPassword,
+      userId: createEmployeeId(employeeRole),
+      employeeRole,
       subjects: [], // Ensure this matches your Teacher model schema
       curriculum,
       experience,
@@ -93,7 +116,6 @@ router.post("/", async (req, res) => {
     // Don't return password hash
     const teacherObj = teacher.toObject();
     delete teacherObj.password;
-
     res.status(201).json({ user: teacherObj });
   } catch (err) {
     console.error("Teacher signup error:", err);
@@ -108,12 +130,97 @@ router.get("/dashboard/:id", async (req, res) => {
       .populate("assignmentsGiven")
       .populate("subjectsTeaching")
       .select("-password");
-      
     if (!teacher) return res.status(404).json({ message: "Teacher not found" });
     res.json({ user: teacher });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server error fetching teacher dashboard" });
+  }
+});
+
+// Get teacher's assigned class groups
+router.get("/:id/class-groups", async (req, res) => {
+  try {
+    const groups = await ClassGroup.find({ teacher: req.params.id })
+      .populate("students", "fullName createdAt")
+      .sort({ createdAt: -1 });
+    res.json(groups);
+  } catch (err) {
+    console.error("Error fetching teacher class groups:", err);
+    res.status(500).json({ message: "Server error fetching class groups" });
+  }
+});
+
+// Get quiz for teacher
+router.get("/:id/quizzes", async (req, res) => {
+  try {
+    const quizzes = await Quiz.find({ teacherId: req.params.id }).sort({ createdAt: -1 });
+    res.json(quizzes);
+  } catch (err) {
+    console.error("Error fetching teacher quizzes:", err);
+    res.status(500).json({ message: "Server error fetching quizzes" });
+  }
+});
+
+// Create assignment for a specific class group
+router.post("/assignments/class-group", async (req, res) => {
+  try {
+    const { teacherId, classGroupId, title, description, subject, dueDate } = req.body;
+    if (!teacherId || !classGroupId || !title || !subject || !dueDate) {
+      return res.status(400).json({ message: "Teacher ID, class group ID, title, subject, and due date are required" });
+    }
+    const group = await ClassGroup.findById(classGroupId);
+    if (!group) return res.status(404).json({ message: "Class group not found" });
+    if (String(group.teacher) !== String(teacherId)) {
+      return res.status(403).json({ message: "You are not authorized to assign assignments to this group" });
+    }
+
+    const assignment = await Assignment.create({
+      title,
+      description,
+      subject: [subject],
+      teacherId,
+      classGroup: group._id,
+      students: group.students,
+      dueDate,
+    });
+
+    res.status(201).json({ assignment });
+  } catch (err) {
+    console.error("Error creating class group assignment:", err);
+    res.status(500).json({ message: "Server error creating assignment" });
+  }
+});
+
+// Create quiz for a specific class group
+router.post("/quizzes/class-group", async (req, res) => {
+  try {
+    const { teacherId, classGroupId, title, description, questions, dueDate, timeLimit } = req.body;
+    if (!teacherId || !classGroupId || !title || !questions || !dueDate) {
+      return res.status(400).json({ message: "Teacher ID, class group ID, title, questions, and due date are required" });
+    }
+    const group = await ClassGroup.findById(classGroupId);
+    if (!group) return res.status(404).json({ message: "Class group not found" });
+    if (String(group.teacher) !== String(teacherId)) {
+      return res.status(403).json({ message: "You are not authorized to create quizzes for this group" });
+    }
+
+    const quiz = await Quiz.create({
+      title,
+      description,
+      subject: [group.subject],
+      questions,
+      teacherId,
+      classGroup: group._id,
+      students: group.students,
+      dueDate,
+      timeLimit: timeLimit || 30,
+    });
+
+    res.status(201).json({ quiz });
+  } catch (err) {
+    console.error("Error creating class group quiz:", err);
+    res.status(500).json({ message: "Server error creating quiz" });
   }
 });
 
@@ -143,37 +250,12 @@ router.post("/forget-password", async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ message: "Email is required" });
-
     const teacher = await Teacher.findOne({ email });
     if (!teacher) return res.status(404).json({ message: "No user found with this email" });
 
-    const resetToken = crypto.randomBytes(32).toString("hex");
-    const resetTokenExpiry = Date.now() + 15 * 60 * 1000; // 15 mins
-
-    // FIX: Use 'teacher' variable, not 'student'
-    teacher.resetToken = resetToken;
-    teacher.resetTokenExpiry = resetTokenExpiry;
+    const resetToken = createPasswordResetToken(teacher);
     await teacher.save();
-
-    const resetLink = `http://localhost:5173/reset-password/${resetToken}`;
-
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-    });
-
-    await transporter.sendMail({
-      from: `"EduConnect Support" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: "Password Reset Request",
-      html: `
-        <p>Hello ${teacher.fullName || "Teacher"},</p>
-        <p>You requested a password reset. Click the link below to set a new one:</p>
-        <a href="${resetLink}" target="_blank" style="background:#4f46e5;color:#fff;padding:10px 20px;text-decoration:none;border-radius:6px;">Reset Password</a>
-        <p>This link will expire in 15 minutes.</p>
-        <p>If you didn't request this, please ignore this email.</p>
-      `,
-    });
+    await sendPasswordResetEmail({ email: teacher.email, name: teacher.fullName, token: resetToken, requestType: "reset your password", role: "teacher" });
 
     res.json({ message: "✅ Password reset link sent! Check your email." });
   } catch (err) {
@@ -187,14 +269,13 @@ router.post("/reset-password/:token", async (req, res) => {
   try {
     const { token } = req.params;
     const { newPassword } = req.body;
-
     const teacher = await Teacher.findOne({
-      resetToken: token,
+      resetToken: hashPasswordResetToken(token),
       resetTokenExpiry: { $gt: Date.now() },
     });
-
     if (!teacher) return res.status(400).json({ message: "Invalid or expired reset link" });
 
+    if (!newPassword || newPassword.length < 6) return res.status(400).json({ message: "Password must be at least 6 characters" });
     const salt = await bcrypt.genSalt(10);
     teacher.password = await bcrypt.hash(newPassword, salt);
     teacher.resetToken = undefined;
@@ -215,9 +296,7 @@ router.post("/assignments", async (req, res) => {
     if (!title || !description || !subjectId || !teacherId) {
       return res.status(400).json({ message: "All required fields must be provided" });
     }
-
     const assignment = await Assignment.create({ title, description, subjectId, teacherId, dueDate });
-    
     await Teacher.findByIdAndUpdate(teacherId, { $push: { assignmentsGiven: assignment._id } });
     res.status(201).json({ assignment });
   } catch (err) {
@@ -249,7 +328,6 @@ router.get("/teacher/broadcasts/:teacherId", async (req, res) => {
     const broadcasts = await Broadcast.find({ teacher: req.params.teacherId })
       .populate("subjectId", "name")
       .sort({ createdAt: -1 });
-      
     res.json(broadcasts.map((b) => ({
       subjectName: b.subjectId?.name || "General",
       message: b.message,
@@ -281,7 +359,6 @@ router.get("/:id/students", async (req, res) => {
   try {
     const teacherId = req.params.id;
     const assignments = await TeacherAssignment.find({ teacherId }).lean();
-    
     if (!assignments.length) return res.status(200).json([]);
 
     // Build query clauses based on TeacherAssignment data
@@ -290,12 +367,10 @@ router.get("/:id/students", async (req, res) => {
       return { curriculum, package: pkg, grade, subjectsEnrolled: { $in: subjectIds } };
     }));
 
-    const students = await Student.find({ $or: clauses }).select("fullName email grade createdAt");
-    
+    const students = await Student.find({ $or: clauses }).select("fullName grade createdAt");
     res.status(200).json(students.map((student) => ({
       _id: student._id,
       name: student.fullName,
-      email: student.email,
       className: student.grade,
       createdAt: student.createdAt,
     })));
@@ -305,4 +380,5 @@ router.get("/:id/students", async (req, res) => {
   }
 });
 
+// ✅ REQUIRED: Default export for ESM import in server.js
 export default router;

@@ -6,9 +6,18 @@ import ClassEnrollment from "../models/ClassEnrollment.js";
 import Student from "../models/Student.js";
 import Package from "../models/package.js";
 import { adminAuth } from "../middleware/adminAuth.js";
+import { findPaymentAddOns, findPaymentPlan, paymentAddOns, paymentPlans } from "../data/paymentPlans.js";
 
 
 const router = express.Router();
+
+// The checkout UI uses this endpoint for renewals and upgrades. Prices are
+// defined on the server and are never accepted from the browser as authority.
+router.get("/plans/:curriculum", (req, res) => {
+  const plans = paymentPlans[req.params.curriculum];
+  if (!plans) return res.status(404).json({ message: "No plans found for this curriculum." });
+  res.json({ plans, addOns: paymentAddOns[req.params.curriculum] || [] });
+});
 
 // ==================== Multer Upload Setup ====================
 const storage = multer.diskStorage({
@@ -18,7 +27,19 @@ const storage = multer.diskStorage({
     cb(null, `${uniqueSuffix}-${file.originalname}`);
   },
 });
-const upload = multer({ storage });
+
+const allowedMimeTypes = ["image/jpeg", "image/png", "image/webp", "application/pdf"];
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (!allowedMimeTypes.includes(file.mimetype)) {
+      return cb(new Error("Invalid file type. Only JPG, PNG, WEBP, and PDF are allowed."), false);
+    }
+    cb(null, true);
+  },
+});
 
 // ==================== Helper: Calculate Expiry ====================
 const calculateExpiry = (startDate, durationStr) => {
@@ -67,6 +88,14 @@ const paystackRequest = async (path, options = {}) => {
 // ==================== Paystack Checkout ====================
 router.post("/paystack/initialize", async (req, res) => {
   try {
+    // Fail before creating a local pending payment when the server cannot
+    // authenticate a checkout request with Paystack.
+    if (!process.env.PAYSTACK_SECRET_KEY) {
+      return res.status(503).json({
+        message: "Online payments are not configured. Set PAYSTACK_SECRET_KEY on the server and restart it.",
+      });
+    }
+
     const {
       studentId,
       studentName,
@@ -83,9 +112,12 @@ router.post("/paystack/initialize", async (req, res) => {
       channels,
       metadata = {},
       paymentMethod,
+      paymentPurpose = "new",
+      addOns = [],
     } = req.body;
     const subjectsArray = Array.isArray(subjects) ? subjects : String(subjects || "").split(",").map((subject) => subject.trim()).filter(Boolean);
-    const amountInPesewas = Math.round(Number(amount) * 100);
+    const plan = findPaymentPlan(curriculum, pkg);
+    const selectedAddOns = findPaymentAddOns(curriculum, addOns);
     const selectedCallbackUrl = callbackUrl || callbackUrlFromBody || `${process.env.FRONTEND_URL || "http://localhost:5173"}/payment`;
     const normalizedChannels = Array.isArray(channels) && channels.length
       ? channels
@@ -93,8 +125,33 @@ router.post("/paystack/initialize", async (req, res) => {
         ? ["card"]
         : ["mobile_money"];
 
-    if (!studentId || !studentName || !email || !curriculum || !pkg || !subjectsArray.length || amountInPesewas <= 0) {
+    if (!studentId || !studentName || !email || !curriculum || !pkg || !plan || !subjectsArray.length) {
       return res.status(400).json({ message: "Complete student, plan, subject, and amount details before paying." });
+    }
+    if (!["new", "renewal", "upgrade"].includes(paymentPurpose)) {
+      return res.status(400).json({ message: "Invalid payment type." });
+    }
+    if (selectedAddOns.some((addOn) => !addOn)) {
+      return res.status(400).json({ message: "One or more selected add-ons are not available for this curriculum." });
+    }
+
+    // A renewal is charged at the student's most recent confirmed price.
+    // Upgrades are calculated from the server plan and add-on catalogue.
+    const previousPayment = paymentPurpose === "renewal"
+      ? await Payment.findOne({ studentId, status: "confirmed" }).sort({ transactionDate: -1, createdAt: -1 })
+      : null;
+    if (paymentPurpose === "renewal" && !previousPayment) {
+      return res.status(400).json({ message: "No confirmed payment was found to renew." });
+    }
+    const selectedPackage = previousPayment?.package || pkg;
+    const selectedPlan = previousPayment ? findPaymentPlan(curriculum, selectedPackage) : plan;
+    const selectedAddOnNames = previousPayment?.addOns || selectedAddOns.map((addOn) => addOn.name);
+    const totalAmount = previousPayment
+      ? Number(previousPayment.amount)
+      : plan.price + selectedAddOns.reduce((total, addOn) => total + addOn.price, 0);
+    const amountInPesewas = Math.round(totalAmount * 100);
+    if (!selectedPlan || amountInPesewas <= 0) {
+      return res.status(400).json({ message: "The selected payment details are invalid." });
     }
 
     const reference = `SM-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
@@ -103,16 +160,18 @@ router.post("/paystack/initialize", async (req, res) => {
       studentId: new mongoose.Types.ObjectId(studentId),
       studentName,
       curriculum,
-      package: pkg,
+      package: selectedPackage,
       grade,
       subjects: subjectsArray,
-      amount: Number(amount),
+      amount: totalAmount,
       referenceName: reference,
       paystackReference: reference,
       paymentProvider: "paystack",
       transactionDate: transaction,
-      duration,
+      duration: selectedPlan.duration,
       status: "pending",
+      paymentPurpose,
+      addOns: selectedAddOnNames,
     });
 
     const checkout = await paystackRequest("/transaction/initialize", {
@@ -129,9 +188,11 @@ router.post("/paystack/initialize", async (req, res) => {
           paymentId: payment._id.toString(),
           studentId,
           phone,
-          package: pkg,
+          package: selectedPackage,
           studentName,
           customerName: studentName,
+          paymentPurpose,
+          addOns: selectedAddOnNames,
           ...metadata,
         },
       }),
@@ -142,6 +203,7 @@ router.post("/paystack/initialize", async (req, res) => {
       reference,
       publicKey: process.env.PAYSTACK_PUBLIC_KEY || "",
       public_key: process.env.PAYSTACK_PUBLIC_KEY || "",
+      amount: totalAmount,
     });
   } catch (err) {
     console.error("Paystack initialization error:", err);
@@ -172,7 +234,10 @@ router.post("/paystack/verify/:reference", async (req, res) => {
       grade: payment.grade,
       subjectsArray: payment.subjects,
     });
-    await Student.findByIdAndUpdate(payment.studentId, { $addToSet: { payments: payment._id } });
+    await Student.findByIdAndUpdate(payment.studentId, {
+      $addToSet: { payments: payment._id },
+      $set: { package: payment.package, selectedPlan: payment.package },
+    });
     res.json({ message: "Payment confirmed and enrollment processed.", payment, enrollmentSummary });
   } catch (err) {
     console.error("Paystack verification error:", err);

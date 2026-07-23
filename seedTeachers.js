@@ -16,6 +16,8 @@ const seedTeachers = async () => {
     const teachers = [
       {
         fullName: "GES Teacher",
+        userId: "SM-TUT-SEED-GES",
+        employeeRole: "tutor",
         email: "ges@school.com",
         phone: "0500000001",
         password: passwordGES,
@@ -27,6 +29,8 @@ const seedTeachers = async () => {
       },
       {
         fullName: "Cambridge Teacher",
+        userId: "SM-TUT-SEED-CAMBRIDGE",
+        employeeRole: "tutor",
         email: "cambridge@school.com",
         phone: "0500000002",
         password: passwordCAMB,

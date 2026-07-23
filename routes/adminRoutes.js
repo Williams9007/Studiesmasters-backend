@@ -1,6 +1,7 @@
 import express from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 
 import Admin from "../models/admin.js";
 import Student from "../models/Student.js";
@@ -9,6 +10,7 @@ import QaoUser from "../models/QaoUser.js";
 import Broadcast from "../models/Broadcast.js";
 
 import { sendOtpEmail } from "../utils/sendOtpEmail.js";
+import { sendCredentialsEmail } from "../utils/sendCredentialsEmail.js";
 import { adminAuth } from "../middleware/adminAuth.js";
 import Users from "../models/Users.js";
 import Payment from "../models/Payment.js";
@@ -194,25 +196,7 @@ router.get("/notifications", adminAuth, async (req, res) => {
 
 
 
-// ================= STUDENT STATS =================
-router.get("/students", adminAuth, async (req, res) => {
-  try {
-    const totalStudents = await Student.countDocuments();
-    const activeStudents = await Student.countDocuments({ status: "active" });
-    const pendingStudents = await Student.countDocuments({ status: "pending" });
-
-    res.json({
-      success: true,
-      totalStudents,
-      activeStudents,
-      pendingStudents,
-    });
-  } catch (err) {
-    res.status(500).json({ message: "Failed to fetch student stats" });
-  }
-});
-
-// GET all students with details
+// ================= GET ALL STUDENTS =================
 router.get("/students", adminAuth, async (req, res) => {
   try {
     const students = await Student.find()
@@ -494,16 +478,16 @@ router.post("/users/create", adminAuth, async (req, res) => {
       fullName,
       name,
       email,
-      password,
+      password: providedPassword,
       role,
       phone,
       experience,
       curriculum,
     } = req.body;
 
-    if (!email || !password || !role) {
+    if (!email || !role) {
       return res.status(400).json({
-        message: "Email, password and role are required",
+        message: "Email and role are required",
       });
     }
 
@@ -522,9 +506,12 @@ router.post("/users/create", adminAuth, async (req, res) => {
       });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    // Auto-generate a temporary password if not provided
+    const tmpPassword = providedPassword || crypto.randomBytes(4).toString("hex").toUpperCase() + "@" + Math.floor(100 + Math.random() * 900);
+    const hashedPassword = await bcrypt.hash(tmpPassword, 10);
 
     let newUser;
+    let generatedUserId = "";
 
     // ================= ADMIN =================
     if (normalizedRole === "admin") {
@@ -532,7 +519,7 @@ router.post("/users/create", adminAuth, async (req, res) => {
         fullName,
         email,
         password: hashedPassword,
-        role: "MINOR_ADMIN", // ✅ must match enum in admin.js
+        role: "MINOR_ADMIN",
       });
     }
 
@@ -540,15 +527,19 @@ router.post("/users/create", adminAuth, async (req, res) => {
     else if (normalizedRole === "teacher") {
       if (!phone || !experience || !curriculum) {
         return res.status(400).json({
-          message:
-            "Teacher requires phone, experience and curriculum",
+          message: "Teacher requires phone, experience and curriculum",
         });
       }
+
+      const teacherCount = await Teacher.countDocuments();
+      generatedUserId = `SM-TUT-${String(teacherCount + 1).padStart(6, "0")}`;
 
       newUser = await Teacher.create({
         fullName,
         email,
         password: hashedPassword,
+        userId: generatedUserId,
+        employeeRole: "tutor",
         phone,
         experience,
         curriculum,
@@ -557,16 +548,19 @@ router.post("/users/create", adminAuth, async (req, res) => {
       });
     }
 
-    // ================= QAO =================
-   else if (normalizedRole === "qao") {
-  newUser = await QaoUser.create({
-    name: fullName || name,
-    email,
-    password: hashedPassword, // now valid
-    role: "qao",
-  });
-}
+    // ================= TUTOR MANAGER (was QAO) =================
+   else if (normalizedRole === "qao" || normalizedRole === "tutor-manager") {
+     const qaoCount = await QaoUser.countDocuments();
+     generatedUserId = `SM-TM-${String(qaoCount + 1).padStart(6, "0")}`;
 
+     newUser = await QaoUser.create({
+       name: fullName || name,
+       email,
+       password: hashedPassword,
+       userId: generatedUserId,
+       role: "qao",
+     });
+   }
 
     else {
       return res.status(400).json({
@@ -574,10 +568,25 @@ router.post("/users/create", adminAuth, async (req, res) => {
       });
     }
 
+    // Send credentials email (non-blocking - don't fail if email fails)
+    try {
+      const displayRole = normalizedRole === "qao" || normalizedRole === "tutor-manager" ? "tutor-manager" : "teacher";
+      await sendCredentialsEmail({
+        email,
+        fullName: fullName || name,
+        userId: generatedUserId || newUser.userId || email,
+        temporaryPassword: tmpPassword,
+        role: displayRole,
+      });
+    } catch (emailErr) {
+      console.warn("⚠️ Credentials email failed, but user was created:", emailErr.message);
+    }
+
     res.status(201).json({
       success: true,
-      message: "User created successfully",
+      message: "User created successfully. Credentials sent via email.",
       user: newUser,
+      credentialsSent: true,
     });
 
   } catch (error) {

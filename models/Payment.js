@@ -75,6 +75,14 @@ const paymentSchema = new mongoose.Schema(
       unique: true,
     },
 
+    paymentPurpose: {
+      type: String,
+      enum: ["new", "renewal", "upgrade"],
+      default: "new",
+    },
+
+    addOns: [{ type: String }],
+
     reviewedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Admin",

@@ -1,7 +1,7 @@
 // src/controllers/classGroupController.js
 import { createGroupsForCurriculum } from "../services/classGroupService.js";
 import ClassGroup from "../models/ClassGroup.js";
-import Teacher from "../models/Teacher.js";
+import Teacher from "../models/teacher.js";
 
 /**
  * @route POST /api/class-groups/generate

@@ -9,27 +9,39 @@ dotenv.config();
 // ==========================
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createServer } from "http";
 import { Server } from "socket.io";
+import rateLimit from "express-rate-limit";
+import jwt from "jsonwebtoken";
+import mongoose from "mongoose";
 import connectDB from "./config/db.js";
 
 // Routes
 import studentRoutes from "./routes/studentRoutes.js";
-import teacherRoutes from "./routes/teacherRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
 import adminRoutes, { setSocketIO as setAdminSocket } from "./routes/adminRoutes.js";
 import subjectRoutes from "./routes/subjectRoutes.js";
+import qaoRoutes from "./routes/qaoRoutes.js";
+import teacherRoutes from "./routes/teacherRoutes.js";
+import classGroupRoutes from "./routes/classGroupRoutes.js";
+import authRoutes from "./routes/authRoutes.js";
 import { setSocketIO as setBroadcastSocket } from "./Controllers/broadcasting.js";
 
 // ==========================
 // VALIDATE ENV VARIABLES
 // ==========================
-if (!process.env.MONGO_URI) {
-  console.error("❌ MONGO_URI is not defined in .env");
+const requiredEnv = ["MONGO_USER", "MONGO_PASSWORD", "MONGO_HOST", "MONGO_DB_NAME", "JWT_SECRET"];
+const missingEnv = requiredEnv.filter((key) => !process.env[key]);
+if (missingEnv.length) {
+  console.error(`❌ Missing required env variables: ${missingEnv.join(", ")}`);
   process.exit(1);
 }
+
+// Build MONGO_URI from parts for backward compatibility with existing code
+process.env.MONGO_URI = `mongodb+srv://${encodeURIComponent(process.env.MONGO_USER)}:${encodeURIComponent(process.env.MONGO_PASSWORD)}@${process.env.MONGO_HOST}/${encodeURIComponent(process.env.MONGO_DB_NAME)}`;
 
 // ==========================
 // APP INITIALIZATION
@@ -42,6 +54,7 @@ const httpServer = createServer(app);
 // ==========================
 const allowedOrigins = [
   "http://localhost:5173",
+  "http://localhost:5174",
   "https://studiesmasters-frontend.onrender.com",
   "https://studiesmasters.com",
   "https://williams9007.github.io",
@@ -64,6 +77,19 @@ app.use(
 );
 
 // ==========================
+// SECURITY MIDDLEWARE
+// ==========================
+app.use(helmet());
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { message: "Too many login attempts, please try again after 15 minutes" },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// ==========================
 // BODY PARSER
 // ==========================
 app.use(express.json());
@@ -80,13 +106,30 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 // ROUTES
 // ==========================
 app.use("/api/students", studentRoutes);
+app.use("/api/students", authRoutes);
 app.use("/api/teachers", teacherRoutes);
+app.use("/api/teachers", authRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/subjects", subjectRoutes);
+app.use("/api/qao", qaoRoutes);
+app.use("/api/class-groups", classGroupRoutes);
 
 app.get("/", (req, res) => {
   res.send("🚀 Studiesmasters API is running");
+});
+
+app.get("/health", (req, res) => {
+  const dbState = mongoose.connection.readyState;
+  const isDbConnected = dbState === 1;
+  const status = isDbConnected ? "ok" : "error";
+
+  res.status(isDbConnected ? 200 : 503).json({
+    status,
+    database: isDbConnected ? "connected" : "disconnected",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+  });
 });
 
 // ==========================
@@ -114,14 +157,15 @@ app.set("onlineUsers", onlineUsers);
 // SOCKET CONNECTION
 // ==========================
 io.on("connection", (socket) => {
-  console.log("🔌 Raw socket connected:", socket.id);
+  console.log("🔌 Socket connected:", socket.id);
 
-  const { userId } = socket.handshake.query;
-
+  const userId = socket.handshake.query?.userId;
   if (userId) {
     socket.userId = userId;
     onlineUsers.set(userId, socket.id);
     console.log("✅ User connected with ID:", userId);
+  } else {
+    console.log("⚠️ Socket connected without user ID");
   }
 
   socket.on("disconnect", () => {

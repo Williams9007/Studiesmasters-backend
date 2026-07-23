@@ -1,5 +1,7 @@
 // backend/routes/qaoRoutes.js
 import express from "express";
+import bcrypt from "bcryptjs";
+import crypto from "crypto";
 import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
 import nodemailer from "nodemailer";
@@ -16,29 +18,24 @@ import { verifyQao } from "../middleware/verifyQao.js";
 dotenv.config();
 const router = express.Router();
 
-// -------------------- QAO Access / Login --------------------
+// -------------------- Tutor Manager Login (email + password) --------------------
 router.post("/access", async (req, res) => {
-  const { qaoCode } = req.body;
+  const { email, password } = req.body;
 
-  if (!qaoCode) 
-    return res.status(400).json({ success: false, message: "Access code is required" });
-
-  const validCode = process.env.QAO_SECRET_CODE || "QAO2025_SECRET";
-
-  if (qaoCode !== validCode) 
-    return res.status(401).json({ success: false, message: "Invalid QAO access code" });
+  if (!email || !password) {
+    return res.status(400).json({ success: false, message: "Email and password are required" });
+  }
 
   try {
-    // Find existing QAO user by email
-    let qao = await QaoUser.findOne({ email: "qao@example.com" });
+    const qao = await QaoUser.findOne({ email: email.toLowerCase().trim() });
 
-    // If not exist, create it
     if (!qao) {
-      qao = await QaoUser.create({
-        name: "Default QAO",
-        email: "qao@example.com",
-        role: "qao",
-      });
+      return res.status(401).json({ success: false, message: "Invalid email or password" });
+    }
+
+    const isMatch = await bcrypt.compare(password, qao.password);
+    if (!isMatch) {
+      return res.status(401).json({ success: false, message: "Invalid email or password" });
     }
 
     const token = jwt.sign(
@@ -49,12 +46,12 @@ router.post("/access", async (req, res) => {
 
     return res.json({
       success: true,
-      message: "QAO access granted",
+      message: "Login successful",
       token,
-      user: { id: qao._id, name: qao.name, email: qao.email, role: qao.role },
+      user: { id: qao._id, name: qao.name, email: qao.email, role: qao.role, userId: qao.userId },
     });
   } catch (err) {
-    console.error("QAO access creation error:", err);
+    console.error("Tutor Manager login error:", err);
     return res.status(500).json({ success: false, message: "Server error" });
   }
 });
@@ -72,7 +69,7 @@ router.post("/broadcast", verifyQao, async (req, res) => {
       sender: senderId,
       receiver: receiverId,
       subject,
-      message,
+      body: message,
       senderRole: "qao",
       receiverRole: "teacher",
     }));
@@ -115,7 +112,7 @@ router.post("/broadcast", verifyQao, async (req, res) => {
 router.get("/sent", verifyQao, async (req, res) => {
   try {
     const messages = await Message.find({ sender: req.user._id })
-      .populate("receiver", "fullName email role")
+      .populate("receiver", "fullName email")
       .sort({ createdAt: -1 });
 
     res.json({ success: true, messages });
@@ -201,7 +198,7 @@ router.get("/kpis", verifyQao, async (req, res) => {
 // -------------------- Notifications --------------------
 router.get("/notifications", verifyQao, async (req, res) => {
   try {
-    const notifications = await Notification.find({ recipient: req.user._id, read: false }).sort({ createdAt: -1 });
+    const notifications = await Notification.find({ userId: req.user._id, read: false }).sort({ createdAt: -1 });
     res.json({ success: true, notifications });
   } catch (err) {
     console.error("Fetch notifications error:", err);

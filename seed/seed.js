@@ -24,8 +24,8 @@ const seedDB = async () => {
 
     // Teachers
     const teachers = await Teacher.insertMany([
-      { name: "Mr. Smith", email: "smith@example.com", password: "hashedpassword" },
-      { name: "Ms. Johnson", email: "johnson@example.com", password: "hashedpassword" },
+      { name: "Mr. Smith", email: "smith@example.com", password: "hashedpassword", userId: "SM-TUT-SEED-001", employeeRole: "tutor" },
+      { name: "Ms. Johnson", email: "johnson@example.com", password: "hashedpassword", userId: "SM-TUT-SEED-002", employeeRole: "tutor" },
     ]);
 
     // Subjects

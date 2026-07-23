@@ -20,4 +20,3 @@ router.post("/generate", generateGroups);
 router.get("/", listGroups);
 
 export default router;
-router.put("/:id", updateTeacher);

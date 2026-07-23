@@ -8,6 +8,9 @@ const messageSchema = new mongoose.Schema(
       ref: "User",
       required: true,
     },
+    receiver: { type: mongoose.Schema.Types.ObjectId, ref: "Teacher" },
+    senderRole: { type: String, trim: true },
+    receiverRole: { type: String, trim: true },
     subject: {
       type: String,
       required: true,

@@ -16,7 +16,6 @@ export const studentAuth = async (req, res, next) => {
     req.user = student;
     next();
   } catch (err) {
-    console.error(err);
     return res.status(401).json({ message: "Invalid or expired token" });
   }
 };

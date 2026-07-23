@@ -3,7 +3,7 @@ import jwt from "jsonwebtoken";
 import Student from "../models/Student.js";
 import Teacher from "../models/teacher.js";
 import Admin from "../models/admin.js";
-import { sendWelcomeEmail, notifyAdmin } from "../utils/sendMessage.js";
+import { sendWelcomeEmail, notifyAdmin } from "../message/sendWelcomeEmail.js";
 
 // ===========================
 // ✅ REGISTER USER
@@ -23,26 +23,63 @@ if (role === "student") {
   const hashedPassword = await bcrypt.hash(password, 10);
 
   // ✅ Create student with subject references
-  const newStudent = await Student.create({
-    fullName,
-    email,
-    password: hashedPassword,
-    curriculum,
-    grade,
-    package: packageName,
-    subjectsEnrolled: subjects, // <-- link subject IDs
-  });
+  // Generate StudiesMasters ID
 
+const studentCount = await Student.countDocuments();
+
+const generatedUserId = 
+`SM-ST-${String(studentCount + 1).padStart(6, "0")}`;
+
+
+// Create student
+
+const newStudent = await Student.create({
+
+  fullName,
+
+  userId: generatedUserId,
+
+  email,
+
+  phone: req.body.phone,
+
+  password: hashedPassword,
+
+  curriculum,
+
+  grade,
+
+  package: packageName,
+
+  subjectsEnrolled: subjects,
+
+  preferredDays: req.body.preferredDays || [],
+
+  preferredTime: req.body.preferredTime || "",
+
+  studyDuration: req.body.studyDuration || "",
+
+  startDate: req.body.startDate || null,
+
+  finishDate: req.body.finishDate || null
+
+});
   try {
     // ✅ Send welcome email
-    await sendWelcomeEmail(
-      email,
-      fullName,
-      packageName,
-      subjects, // can map to names if you want later
-      curriculum
-    );
-
+    await sendWelcomeEmail({
+      userEmail: newStudent.email,
+      studentName: newStudent.fullName,
+      packageName: newStudent.package,
+      subjects: newStudent.subjectNames,
+      studyDuration: newStudent.studyDuration,
+      temporaryPassword: password,
+      userId: newStudent.userId,
+      phone: newStudent.phone,
+      curriculum: newStudent.curriculum,
+      grade: newStudent.grade,
+      preferredDays: newStudent.preferredDays,
+      preferredTime: newStudent.preferredTime,
+    });
     // ✅ Notify admin
     await notifyAdmin(
       "New Student Registration",
