@@ -3,7 +3,7 @@ import { Router } from "express";
 import {
   generateGroups,
   listGroups,
-} from "../controllers/classGroupController.js";
+  } from "../Controllers/classGroupController.js";
 
 const router = Router();
 

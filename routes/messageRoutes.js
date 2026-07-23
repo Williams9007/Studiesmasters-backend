@@ -2,8 +2,8 @@ import express from "express";
 import Message from "../models/Message.js";
 import MessageRecipient from "../models/MessageRecipient.js";
 import User from "../models/Users.js";
-import { verifyAuth } from "../middleware/verifyAuth.js"; 
-// verifyAuth should attach req.user
+import { verifyToken } from "../middleware/auth.js"; 
+// verifyToken should attach req.user
 
 const router = express.Router();
 
@@ -13,7 +13,7 @@ const router = express.Router();
    - To specific user IDs
    - OR by role (broadcast)
 ===================================================== */
-router.post("/send", verifyAuth, async (req, res) => {
+router.post("/send", verifyToken, async (req, res) => {
   try {
     const { subject, body, recipients, role } = req.body;
 
@@ -73,7 +73,7 @@ users.forEach((u) => {
 /* =====================================================
    📥 GET INBOX (For Logged In User)
 ===================================================== */
-router.get("/inbox", verifyAuth, async (req, res) => {
+router.get("/inbox", verifyToken, async (req, res) => {
   try {
     const inbox = await MessageRecipient.find({
       recipient: req.user._id,
@@ -96,7 +96,7 @@ router.get("/inbox", verifyAuth, async (req, res) => {
 /* =====================================================
    📖 MARK MESSAGE AS READ
 ===================================================== */
-router.post("/:messageId/read", verifyAuth, async (req, res) => {
+router.post("/:messageId/read", verifyToken, async (req, res) => {
   try {
     await MessageRecipient.findOneAndUpdate(
       {

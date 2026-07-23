@@ -1,5 +1,5 @@
 import express from "express";
-import { sendBroadcast } from "../controllers/broadcastController.js";
+import { sendBroadcast } from "../Controllers/broadcasting.js";
 import { verifyAdmin } from "../middleware/verifyAdmin.js"; // or verifyTeacher
 
 const router = express.Router();
