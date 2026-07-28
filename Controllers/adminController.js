@@ -1,5 +1,5 @@
 import Admin from "../models/admin.js";
-import Student from "../models/student.js";
+import Student from "../models/Student.js";
 import Teacher from "../models/teacher.js";
 import Payment from "../models/Payment.js";
 import bcrypt from "bcryptjs";
