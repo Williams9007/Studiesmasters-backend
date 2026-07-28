@@ -23,8 +23,8 @@ export const sendCredentialsEmail = async ({
 }) => {
   const roleLabel = role === "tutor-manager" ? "Tutor Manager" : "Teacher";
   const dashboardLink = role === "tutor-manager"
-    ? "https://studiesmasters.com/qao/access"
-    : "https://studiesmasters.com/teacher/dashboard";
+    ? "https://studiesmasters-frontend.onrender.com/#/qao/access"
+    : "https://studiesmasters-frontend.onrender.com/#/teacher/dashboard";
 
   try {
     const { data, error } = await resend.emails.send({

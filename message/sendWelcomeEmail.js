@@ -239,7 +239,7 @@ export const sendWelcomeEmail = async ({
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:30px;">
           <tr>
             <td align="center">
-              <a href="https://studiesmasters.com/login" style="display:inline-block; background:#1d4ed8; color:#ffffff; padding:14px 36px; border-radius:8px; text-decoration:none; font-weight:700; font-size:16px;">Login To Dashboard</a>
+              <a href="https://studiesmasters-frontend.onrender.com/#/login" style="display:inline-block; background:#1d4ed8; color:#ffffff; padding:14px 36px; border-radius:8px; text-decoration:none; font-weight:700; font-size:16px;">Login To Dashboard</a>
             </td>
           </tr>
         </table>
