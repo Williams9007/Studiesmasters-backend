@@ -12,6 +12,8 @@ import Resource from "../models/Resource.js";
 import KPI from "../models/Kpi.js";           
 import Notification from "../models/Notification.js";
 import Message from "../models/Message.js";
+import MessageRecipient from "../models/MessageRecipient.js";
+import ClassGroup from "../models/ClassGroup.js";
 
 import { verifyQao } from "../middleware/verifyQao.js";
 
@@ -65,16 +67,23 @@ router.post("/broadcast", verifyQao, async (req, res) => {
     if (!recipients?.length)
       return res.status(400).json({ success: false, message: "No recipients provided" });
 
-    const messages = recipients.map((receiverId) => ({
-      sender: senderId,
-      receiver: receiverId,
-      subject,
-      body: message,
-      senderRole: "qao",
-      receiverRole: "teacher",
-    }));
+    const messageDocs = await Message.insertMany(
+      recipients.map((receiverId) => ({
+        sender: senderId,
+        receiver: receiverId,
+        subject,
+        body: message,
+        senderRole: "qao",
+        receiverRole: "teacher",
+      }))
+    );
 
-    await Message.insertMany(messages);
+    await MessageRecipient.insertMany(
+      messageDocs.map((m) => ({
+        message: m._id,
+        recipient: m.receiver,
+      }))
+    );
 
     // Email notification (optional)
     if (process.env.SMTP_USER && process.env.SMTP_PASS) {
@@ -122,6 +131,29 @@ router.get("/sent", verifyQao, async (req, res) => {
   }
 });
 
+router.delete("/messages/:messageId", verifyQao, async (req, res) => {
+  try {
+    const message = await Message.findById(req.params.messageId);
+    if (!message) {
+      return res.status(404).json({ success: false, message: "Message not found" });
+    }
+    
+    // Verify the message was sent by this QAO user
+    if (String(message.sender) !== String(req.user._id)) {
+      return res.status(403).json({ success: false, message: "Not authorized to delete this message" });
+    }
+    
+    // Delete the message and its recipient records
+    await MessageRecipient.deleteMany({ message: req.params.messageId });
+    await Message.findByIdAndDelete(req.params.messageId);
+    
+    res.json({ success: true, message: "Message deleted successfully" });
+  } catch (err) {
+    console.error("Delete message error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 router.get("/inbox", verifyQao, async (req, res) => {
   try {
     const messages = await Message.find({ receiver: req.user._id })
@@ -148,7 +180,7 @@ router.get("/users", verifyQao, async (req, res) => {
 
 router.get("/teachers", verifyQao, async (req, res) => {
   try {
-    const teachers = await Teacher.find().select("fullName email subjects");
+    const teachers = await Teacher.find().select("fullName email curriculum");
     res.json({ success: true, teachers });
   } catch (err) {
     console.error("Fetch teachers error:", err);
@@ -196,6 +228,19 @@ router.get("/kpis", verifyQao, async (req, res) => {
 });
 
 // -------------------- Notifications --------------------
+router.get("/class-groups", verifyQao, async (req, res) => {
+  try {
+    const groups = await ClassGroup.find()
+      .populate("teacher", "fullName email")
+      .populate("students", "fullName email phone grade")
+      .sort({ createdAt: -1 });
+    res.json({ success: true, groups: groups.map((group) => ({ ...group.toObject(), studentCount: group.students.length })) });
+  } catch (err) {
+    console.error("Fetch class groups error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 router.get("/notifications", verifyQao, async (req, res) => {
   try {
     const notifications = await Notification.find({ userId: req.user._id, read: false }).sort({ createdAt: -1 });

@@ -8,6 +8,7 @@ import Student from "../models/Student.js";
 import Teacher from "../models/teacher.js";
 import QaoUser from "../models/QaoUser.js";
 import Broadcast from "../models/Broadcast.js";
+import Subject from "../models/Subject.js";
 
 import { sendOtpEmail } from "../utils/sendOtpEmail.js";
 import { sendCredentialsEmail } from "../utils/sendCredentialsEmail.js";
@@ -15,6 +16,7 @@ import { adminAuth } from "../middleware/adminAuth.js";
 import Users from "../models/Users.js";
 import Payment from "../models/Payment.js";
 import ClassGroup from "../models/ClassGroup.js";
+import { curriculumCatalog } from "../data/curriculumCatalog.js";
 
 
 const router = express.Router();
@@ -194,6 +196,22 @@ router.get("/notifications", adminAuth, async (req, res) => {
   }
 });
 
+// ================= MARK NOTIFICATION AS READ =================
+router.post("/notifications/:id/read", adminAuth, async (req, res) => {
+  try {
+    const broadcast = await Broadcast.findById(req.params.id);
+    if (!broadcast) {
+      return res.status(404).json({ message: "Notification not found" });
+    }
+    // Broadcasts are read-only records, so we just acknowledge the read action
+    // Optionally you could track reads per admin in a separate collection
+    res.json({ success: true, message: "Notification marked as read" });
+  } catch (err) {
+    console.error("Error marking notification as read:", err);
+    res.status(500).json({ message: "Failed to mark notification as read" });
+  }
+});
+
 
 
 // ================= GET ALL STUDENTS =================
@@ -233,6 +251,20 @@ router.get("/students/list", adminAuth, async (req, res) => {
   } catch (err) {
     console.error("❌ Error fetching students for broadcast:", err);
     res.status(500).json({ message: "Failed to fetch students" });
+  }
+});
+
+// GET all teachers with basic info for broadcast
+router.get("/teachers/list", adminAuth, async (req, res) => {
+  try {
+    const teachers = await Teacher.find()
+      .select("_id fullName email experience curriculum status createdAt")
+      .sort({ fullName: 1 });
+
+    res.json({ success: true, teachers });
+  } catch (err) {
+    console.error("❌ Error fetching teachers for broadcast:", err);
+    res.status(500).json({ message: "Failed to fetch teachers" });
   }
 });
 
@@ -534,6 +566,18 @@ router.post("/users/create", adminAuth, async (req, res) => {
       const teacherCount = await Teacher.countDocuments();
       generatedUserId = `SM-TUT-${String(teacherCount + 1).padStart(6, "0")}`;
 
+      // Auto-assign subjects based on curriculum
+      const catalog = curriculumCatalog[curriculum];
+      const subjectDocs = catalog
+        ? await Subject.find({ name: { $in: catalog.subjects }, curriculum }).lean()
+        : [];
+
+      // If no exact matches, just create subject references by name
+      const subjectIds = (catalog?.subjects || []).map((name) => {
+        const found = subjectDocs.find((s) => s.name === name);
+        return found ? found._id : null;
+      }).filter(Boolean);
+
       newUser = await Teacher.create({
         fullName,
         email,
@@ -545,6 +589,7 @@ router.post("/users/create", adminAuth, async (req, res) => {
         curriculum,
         role: "teacher",
         status: "active",
+        subjectsTeaching: subjectIds,
       });
     }
 

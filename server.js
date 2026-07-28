@@ -28,6 +28,8 @@ import qaoRoutes from "./routes/qaoRoutes.js";
 import teacherRoutes from "./routes/teacherRoutes.js";
 import classGroupRoutes from "./routes/classGroupRoutes.js";
 import authRoutes from "./routes/authRoutes.js";
+import resourceRoutes from "./routes/resourceRoutes.js";
+import messageRoutes from "./routes/messageRoutes.js";
 import { setSocketIO as setBroadcastSocket } from "./Controllers/broadcasting.js";
 
 // ==========================
@@ -114,6 +116,8 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/subjects", subjectRoutes);
 app.use("/api/qao", qaoRoutes);
 app.use("/api/class-groups", classGroupRoutes);
+app.use("/api/resources", resourceRoutes);
+app.use("/api/messages", messageRoutes);
 
 app.get("/", (req, res) => {
   res.send("🚀 Studiesmasters API is running");

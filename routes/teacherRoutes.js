@@ -100,6 +100,17 @@ router.post("/", async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
+    // Auto-assign subjects based on curriculum
+    const catalog = curriculumCatalog[curriculum];
+    const subjectDocs = catalog
+      ? await Subject.find({ name: { $in: catalog.subjects }, curriculum }).lean()
+      : [];
+
+    const subjectIds = (catalog?.subjects || []).map((name) => {
+      const found = subjectDocs.find((s) => s.name === name);
+      return found ? found._id : null;
+    }).filter(Boolean);
+
     const teacher = await Teacher.create({
       name: fullName,
       fullName,
@@ -108,9 +119,9 @@ router.post("/", async (req, res) => {
       password: hashedPassword,
       userId: createEmployeeId(employeeRole),
       employeeRole,
-      subjects: [], // Ensure this matches your Teacher model schema
       curriculum,
       experience,
+      subjectsTeaching: subjectIds,
     });
 
     // Don't return password hash
@@ -226,9 +237,22 @@ router.post("/quizzes/class-group", async (req, res) => {
 
 router.get("/:id/subjects", async (req, res) => {
   try {
-    const teacher = await Teacher.findById(req.params.id).populate("subjectsTeaching");
+    const teacher = await Teacher.findById(req.params.id).select("subjectsTeaching curriculum");
     if (!teacher) return res.status(404).json({ message: "Teacher not found" });
-    res.json(teacher.subjectsTeaching || []);
+
+    // If subjectsTeaching is populated, return it
+    if (teacher.subjectsTeaching && teacher.subjectsTeaching.length > 0) {
+      return res.json(teacher.subjectsTeaching);
+    }
+
+    // Fallback: try to get subjects from Subject collection where teacherId matches
+    const subjects = await Subject.find({ teacherId: req.params.id }).select("name grade package").lean();
+    if (subjects.length > 0) {
+      return res.json(subjects.map(s => ({ ...s, _id: s._id || s.name })));
+    }
+
+    // If still no subjects, return empty array
+    res.json([]);
   } catch (err) {
     console.error("Error fetching teacher subjects:", err);
     res.status(500).json({ message: "Server error fetching teacher subjects" });
@@ -308,13 +332,34 @@ router.post("/assignments", async (req, res) => {
 // 🔹 POST /teacher/broadcast
 router.post("/teacher/broadcast", async (req, res) => {
   try {
-    const { teacherId, subjectId, message } = req.body;
+    const { teacherId, classGroupId, message } = req.body;
     const teacher = await Teacher.findById(teacherId);
-    const subject = await Subject.findById(subjectId);
-    if (!teacher || !subject) return res.status(404).json({ message: "Invalid teacher or subject" });
+    const classGroup = await ClassGroup.findById(classGroupId);
+    if (!teacher || !classGroup) return res.status(404).json({ message: "Invalid teacher or class group" });
 
-    const broadcast = new Broadcast({ teacher: teacherId, subjectId, message });
+    // Send to all students in the class group
+    const broadcast = new Broadcast({
+      teacher: teacherId,
+      classGroup: classGroupId,
+      subjectId: classGroup.subject,
+      message,
+      type: "class-group",
+      recipients: classGroup.students,
+      recipientsCount: classGroup.students.length,
+    });
     await broadcast.save();
+
+    // Emit to all students in the class group
+    if (io) {
+      classGroup.students.forEach((studentId) => {
+        io.to(studentId.toString()).emit("broadcast:new", {
+          message,
+          subjectName: classGroup.subject,
+          sender: teacher.fullName,
+        });
+      });
+    }
+
     res.json({ message: "Broadcast sent successfully", broadcast });
   } catch (err) {
     console.error(err);
@@ -358,22 +403,41 @@ router.get("/:id/class-summary", async (req, res) => {
 router.get("/:id/students", async (req, res) => {
   try {
     const teacherId = req.params.id;
+
+    // Try to get students from TeacherAssignment records
     const assignments = await TeacherAssignment.find({ teacherId }).lean();
-    if (!assignments.length) return res.status(200).json([]);
 
-    // Build query clauses based on TeacherAssignment data
-    const clauses = await Promise.all(assignments.map(async ({ curriculum, package: pkg, grade, subject }) => {
-      const subjectIds = await Subject.find({ name: subject }).distinct("_id");
-      return { curriculum, package: pkg, grade, subjectsEnrolled: { $in: subjectIds } };
-    }));
+    // Also try to get students from ClassGroups where this teacher is assigned
+    const classGroups = await ClassGroup.find({ teacher: teacherId }).populate("students", "fullName grade createdAt").lean();
 
-    const students = await Student.find({ $or: clauses }).select("fullName grade createdAt");
-    res.status(200).json(students.map((student) => ({
-      _id: student._id,
-      name: student.fullName,
-      className: student.grade,
-      createdAt: student.createdAt,
-    })));
+    const studentSet = new Map();
+
+    // Add students from TeacherAssignments
+    if (assignments.length > 0) {
+      const clauses = await Promise.all(assignments.map(async ({ curriculum, package: pkg, grade, subject }) => {
+        const subjectIds = await Subject.find({ name: subject }).distinct("_id");
+        return { curriculum, package: pkg, grade, subjectsEnrolled: { $in: subjectIds } };
+      }));
+
+      const studentsFromAssignments = await Student.find({ $or: clauses }).select("fullName grade createdAt").lean();
+      studentsFromAssignments.forEach((s) => {
+        studentSet.set(s._id.toString(), { _id: s._id, name: s.fullName, className: s.grade, createdAt: s.createdAt });
+      });
+    }
+
+    // Add students from ClassGroups
+    classGroups.forEach((group) => {
+      if (group.students && Array.isArray(group.students)) {
+        group.students.forEach((s) => {
+          if (!studentSet.has(s._id.toString())) {
+            studentSet.set(s._id.toString(), { _id: s._id, name: s.fullName, className: s.grade || "N/A", createdAt: s.createdAt });
+          }
+        });
+      }
+    });
+
+    const students = Array.from(studentSet.values());
+    res.status(200).json(students);
   } catch (err) {
     console.error("Error fetching teacher students:", err);
     res.status(500).json({ message: "Server error fetching students" });

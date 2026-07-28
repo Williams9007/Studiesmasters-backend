@@ -241,6 +241,17 @@ router.post("/register", async (req, res) => {
   }
 });
 
+router.get("/me", studentAuth, async (req, res) => {
+  try {
+    const student = await Student.findById(req.user._id).populate("subjectsEnrolled", "name package grade price").select("-password");
+    const payments = await Payment.find({ studentId: student._id }).sort({ createdAt: -1 });
+    res.json({ user: student, subjects: student.subjectsEnrolled, payments });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error fetching student" });
+  }
+});
+
 router.get("/:studentId/payment-summary", async (req, res) => {
   try {
     const student = await Student.findById(req.params.studentId)

@@ -16,11 +16,11 @@ export const setSocketIO = (socketInstance) => {
 };
 
 /**
- * Send a broadcast to students, teachers, QAOs, or all
+ * Send a broadcast to students, teachers, tutor managers, or all
  */
 export const sendBroadcast = async (req, res) => {
   try {
-    const { subject, message, type, recipients } = req.body;
+    const { subject, message, recipientType, recipientId, recipients } = req.body;
 
     if (!message?.trim())
       return res.status(400).json({ message: "Message cannot be empty." });
@@ -29,15 +29,18 @@ export const sendBroadcast = async (req, res) => {
     let usersToNotify = [];
     if (recipients?.length > 0) {
       usersToNotify = recipients;
+    } else if (recipientId) {
+      // Single recipient - could be student, teacher, or tutor manager
+      usersToNotify = [recipientId];
     } else {
-      switch (type) {
+      switch (recipientType) {
         case "students":
           usersToNotify = (await Student.find({})).map((s) => s._id);
           break;
         case "teachers":
           usersToNotify = (await Teacher.find({})).map((t) => t._id);
           break;
-        case "qaos":
+        case "tutormanagers":
           usersToNotify = (await QAO.find({})).map((q) => q._id);
           break;
         default:
