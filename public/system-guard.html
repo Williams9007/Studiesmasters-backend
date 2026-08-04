@@ -1,0 +1,939 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>🛡️ System Guard - Remote Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: #0f0f1a;
+      color: #e0e0e0;
+      min-height: 100vh;
+      padding: 10px;
+    }
+    .container { max-width: 500px; margin: 0 auto; }
+
+    /* Login */
+    #loginScreen {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 90vh;
+      padding: 20px;
+    }
+    #loginScreen h1 { font-size: 1.8em; margin-bottom: 10px; color: #00d4ff; }
+    #loginScreen p { color: #888; margin-bottom: 30px; text-align: center; }
+    .login-card {
+      background: #1a1a2e;
+      border-radius: 16px;
+      padding: 30px 20px;
+      width: 100%;
+      max-width: 380px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    }
+    .login-card input {
+      width: 100%;
+      padding: 14px 16px;
+      margin-bottom: 12px;
+      background: #16213e;
+      border: 1px solid #2a2a4a;
+      border-radius: 10px;
+      color: #fff;
+      font-size: 16px;
+      outline: none;
+      transition: border 0.2s;
+    }
+    .login-card input:focus { border-color: #00d4ff; }
+    .login-card button {
+      width: 100%;
+      padding: 14px;
+      background: #00d4ff;
+      border: none;
+      border-radius: 10px;
+      color: #000;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .login-card button:active { background: #00b8e0; }
+    .login-card button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .login-error { color: #ff4444; font-size: 14px; text-align: center; margin-top: 10px; }
+
+    /* Dashboard */
+    #dashboard { display: none; }
+
+    /* Header */
+    .header {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      border-radius: 16px;
+      padding: 16px;
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .header h2 { font-size: 1.1em; color: #00d4ff; }
+    .header .status-badge {
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .status-healthy { background: #00c85320; color: #00c853; border: 1px solid #00c85340; }
+    .status-degraded { background: #ff910020; color: #ff9100; border: 1px solid #ff910040; }
+    .status-critical { background: #ff174420; color: #ff1744; border: 1px solid #ff174440; }
+    .logout-btn {
+      background: none;
+      border: 1px solid #ff444440;
+      color: #ff4444;
+      padding: 6px 14px;
+      border-radius: 8px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .logout-btn:active { background: #ff444420; }
+
+    /* Cards */
+    .card {
+      background: #1a1a2e;
+      border-radius: 16px;
+      padding: 14px;
+      margin-bottom: 10px;
+    }
+    .card-title {
+      font-size: 12px;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 10px;
+    }
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+      border-bottom: 1px solid #2a2a4a20;
+    }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-label { font-size: 13px; color: #aaa; }
+    .stat-value { font-size: 14px; font-weight: 600; color: #fff; }
+    .stat-value.good { color: #00c853; }
+    .stat-value.warn { color: #ff9100; }
+    .stat-value.bad { color: #ff1744; }
+    .stat-value.info { color: #00d4ff; }
+
+    /* Tabs */
+    .tabs {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 12px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .tab {
+      flex: 1;
+      min-width: 70px;
+      padding: 10px 8px;
+      text-align: center;
+      background: #1a1a2e;
+      border: none;
+      border-radius: 10px;
+      color: #888;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .tab.active { background: #00d4ff20; color: #00d4ff; border: 1px solid #00d4ff40; }
+    .tab:active { transform: scale(0.97); }
+
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* Action buttons */
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .action-btn {
+      padding: 12px;
+      border: none;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .action-btn:active { transform: scale(0.97); }
+    .btn-primary { background: #00d4ff; color: #000; }
+    .btn-danger { background: #ff1744; color: #fff; }
+    .btn-success { background: #00c853; color: #000; }
+    .btn-warning { background: #ff9100; color: #000; }
+    .btn-info { background: #2979ff; color: #fff; }
+
+    /* IP block input */
+    .ip-input-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .ip-input-row input {
+      flex: 1;
+      padding: 10px 12px;
+      background: #16213e;
+      border: 1px solid #2a2a4a;
+      border-radius: 8px;
+      color: #fff;
+      font-size: 14px;
+      outline: none;
+    }
+    .ip-input-row input:focus { border-color: #00d4ff; }
+    .ip-input-row button {
+      padding: 10px 16px;
+      background: #ff1744;
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    /* IP list */
+    .ip-list {
+      margin-top: 10px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .ip-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid #2a2a4a20;
+    }
+    .ip-item .unblock-btn {
+      background: none;
+      border: 1px solid #00c853;
+      color: #00c853;
+      padding: 4px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    /* Issues */
+    .issue {
+      padding: 10px;
+      margin-bottom: 6px;
+      border-radius: 8px;
+      font-size: 13px;
+    }
+    .issue.critical { background: #ff174420; border-left: 3px solid #ff1744; }
+    .issue.warning { background: #ff910020; border-left: 3px solid #ff9100; }
+
+    /* Toast */
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #1a1a2e;
+      color: #fff;
+      padding: 12px 24px;
+      border-radius: 10px;
+      font-size: 14px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+      z-index: 999;
+      opacity: 0;
+      transition: opacity 0.3s;
+      pointer-events: none;
+      max-width: 90%;
+      text-align: center;
+    }
+    .toast.show { opacity: 1; }
+
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: #888;
+    }
+    .loading::after {
+      content: '';
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 2px solid #888;
+      border-top-color: #00d4ff;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      margin-left: 8px;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .last-updated {
+      text-align: center;
+      font-size: 11px;
+      color: #555;
+      margin-top: 16px;
+      padding-bottom: 30px;
+    }
+
+    @media (max-width: 400px) {
+      .header h2 { font-size: 0.95em; }
+      .tab { font-size: 11px; padding: 8px 4px; min-width: 60px; }
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <!-- ==================== LOGIN SCREEN ==================== -->
+  <div id="loginScreen">
+    <h1>🛡️ System Guard</h1>
+    <p>Remote server monitoring & control dashboard</p>
+    <div class="login-card">
+      <input type="email" id="loginEmail" placeholder="Admin Email" autocomplete="email" inputmode="email">
+      <input type="password" id="loginPassword" placeholder="Password" autocomplete="current-password">
+      <button id="loginBtn" onclick="handleLogin()">🔐 Login</button>
+      <div id="loginError" class="login-error"></div>
+    </div>
+  </div>
+
+  <!-- ==================== DASHBOARD ==================== -->
+  <div id="dashboard">
+    <!-- Header -->
+    <div class="header">
+      <div>
+        <h2>🛡️ System Guard</h2>
+        <span id="statusBadge" class="status-badge status-healthy">Checking...</span>
+      </div>
+      <div>
+        <span style="font-size:11px;color:#666;display:block;text-align:right;" id="serverUptime"></span>
+        <button class="logout-btn" onclick="handleLogout()">Logout</button>
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <button class="tab active" data-tab="overview" onclick="switchTab('overview')">📊 Overview</button>
+      <button class="tab" data-tab="firewall" onclick="switchTab('firewall')">🛡️ Firewall</button>
+      <button class="tab" data-tab="issues" onclick="switchTab('issues')">⚠️ Issues</button>
+      <button class="tab" data-tab="actions" onclick="switchTab('actions')">🔧 Actions</button>
+    </div>
+
+    <!-- Tab: Overview -->
+    <div id="tab-overview" class="tab-content active">
+      <div class="card">
+        <div class="card-title">📈 Performance</div>
+        <div class="stat-row">
+          <span class="stat-label">Memory (RSS)</span>
+          <span class="stat-value info" id="memRSS">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Heap Used</span>
+          <span class="stat-value info" id="memHeap">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">CPU Usage</span>
+          <span class="stat-value" id="cpuUsage">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Event Loop Lag</span>
+          <span class="stat-value" id="eventLoop">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Avg Response Time</span>
+          <span class="stat-value" id="avgResponse">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Max Response Time</span>
+          <span class="stat-value" id="maxResponse">-</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🗄️ Database</div>
+        <div class="stat-row">
+          <span class="stat-label">Status</span>
+          <span class="stat-value good" id="dbStatus">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Last Ping</span>
+          <span class="stat-value" id="dbLastPing">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Ping Duration</span>
+          <span class="stat-value" id="dbPingDuration">-</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">📊 Request Statistics</div>
+        <div class="stat-row">
+          <span class="stat-label">Total Requests</span>
+          <span class="stat-value" id="reqTotal">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Successful</span>
+          <span class="stat-value good" id="reqSuccess">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Failed</span>
+          <span class="stat-value" id="reqFailed">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Error Rate</span>
+          <span class="stat-value" id="reqErrorRate">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Active Connections</span>
+          <span class="stat-value info" id="reqActive">-</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab: Firewall -->
+    <div id="tab-firewall" class="tab-content">
+      <div class="card">
+        <div class="card-title">🚫 Blocked IPs</div>
+        <div style="text-align:center;font-size:2em;font-weight:700;color:#ff1744;" id="blockedIPCount">0</div>
+        <div class="ip-input-row">
+          <input type="text" id="blockIPInput" placeholder="IP address to block (e.g. 192.168.1.100)" inputmode="text">
+          <button onclick="handleBlockIP()">Block</button>
+        </div>
+        <div class="ip-list" id="blockedIPList">
+          <div style="color:#555;text-align:center;padding:10px;">No blocked IPs</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">⚙️ Firewall Config</div>
+        <div class="stat-row">
+          <span class="stat-label">Status</span>
+          <span class="stat-value good" id="fwEnabled">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Max Req/Minute</span>
+          <span class="stat-value" id="fwMaxMin">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Max Req/Second</span>
+          <span class="stat-value" id="fwMaxSec">-</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab: Issues -->
+    <div id="tab-issues" class="tab-content">
+      <div class="card">
+        <div class="card-title">⚠️ Current Issues</div>
+        <div id="issuesList">
+          <div style="color:#555;text-align:center;padding:20px;">No issues found. ✅</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">📋 Recent Warnings</div>
+        <div id="warningsList">
+          <div style="color:#555;text-align:center;padding:10px;">No warnings</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab: Actions -->
+    <div id="tab-actions" class="tab-content">
+      <div class="card">
+        <div class="card-title">🔧 Quick Actions</div>
+        <div class="actions">
+          <button class="action-btn btn-primary" onclick="handleRunDiagnosis()">🔍 Run Diagnosis</button>
+          <button class="action-btn btn-success" onclick="handleRunHealing()">🔧 Run Healing</button>
+          <button class="action-btn btn-info" onclick="refreshDashboard()">🔄 Refresh All</button>
+          <button class="action-btn btn-warning" onclick="handleUnblockAllIPs()">🚫 Unblock All</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">📜 Healing History</div>
+        <div id="healingHistory">
+          <div style="color:#555;text-align:center;padding:10px;">No healing history</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="last-updated" id="lastUpdated">Last updated: --</div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+</div>
+
+<script>
+// ==========================
+// STATE
+// ==========================
+let AUTH_TOKEN = null;
+let API_BASE = window.location.origin;
+let autoRefreshInterval = null;
+
+// ==========================
+// TOAST
+// ==========================
+function showToast(msg, isError = false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.background = isError ? '#ff174430' : '#1a1a2e';
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// ==========================
+// API CALLS
+// ==========================
+async function apiCall(method, path, body = null) {
+  const opts = {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+  };
+  if (AUTH_TOKEN) {
+    opts.headers['Authorization'] = `Bearer ${AUTH_TOKEN}`;
+  }
+  if (body) opts.body = JSON.stringify(body);
+
+  try {
+    const res = await fetch(`${API_BASE}${path}`, opts);
+    const data = await res.json();
+
+    if (res.status === 401 || res.status === 403) {
+      if (data.error === 'Token expired') {
+        showToast('Session expired. Please login again.', true);
+        handleLogout();
+        return null;
+      }
+    }
+
+    if (!res.ok && !data.success) {
+      showToast(data.error || data.message || 'Request failed', true);
+      return null;
+    }
+
+    return data;
+  } catch (err) {
+    showToast('Network error. Check your connection.', true);
+    return null;
+  }
+}
+
+// ==========================
+// LOGIN
+// ==========================
+async function handleLogin() {
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  const btn = document.getElementById('loginBtn');
+  const errEl = document.getElementById('loginError');
+
+  if (!email || !password) {
+    errEl.textContent = 'Please enter email and password';
+    return;
+  }
+
+  errEl.textContent = '';
+  btn.disabled = true;
+  btn.textContent = '🔄 Logging in...';
+
+  try {
+    // Step 1: Login (send OTP)
+    const loginRes = await fetch(`${API_BASE}/api/admin/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+
+    const loginData = await loginRes.json();
+    if (!loginData.success) {
+      errEl.textContent = loginData.message || 'Login failed';
+      btn.disabled = false;
+      btn.textContent = '🔐 Login';
+      return;
+    }
+
+    // Step 2: Prompt for OTP (since your admin uses OTP verification)
+    const otp = prompt('📱 OTP has been sent to your email. Enter the 6-digit code:');
+    if (!otp || otp.length !== 6) {
+      errEl.textContent = 'Invalid OTP';
+      btn.disabled = false;
+      btn.textContent = '🔐 Login';
+      return;
+    }
+
+    const otpRes = await fetch(`${API_BASE}/api/admin/verify-otp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminId: loginData.adminId, otp }),
+    });
+
+    const otpData = await otpRes.json();
+    if (!otpData.success) {
+      errEl.textContent = otpData.message || 'OTP verification failed';
+      btn.disabled = false;
+      btn.textContent = '🔐 Login';
+      return;
+    }
+
+    // Success!
+    AUTH_TOKEN = otpData.token;
+
+    // Store token for persistence
+    localStorage.setItem('systemGuardToken', AUTH_TOKEN);
+    localStorage.setItem('systemGuardEmail', email);
+
+    document.getElementById('loginScreen').style.display = 'none';
+    document.getElementById('dashboard').style.display = 'block';
+
+    // Prevent firewall from blocking us for rapid API calls
+    document.getElementById('dashboard').dataset.ready = 'true';
+
+    await refreshDashboard();
+    startAutoRefresh();
+    showToast('✅ Logged in successfully');
+  } catch (err) {
+    errEl.textContent = 'Connection error. Is the server running?';
+  }
+
+  btn.disabled = false;
+  btn.textContent = '🔐 Login';
+}
+
+// ==========================
+// LOGOUT
+// ==========================
+function handleLogout() {
+  AUTH_TOKEN = null;
+  localStorage.removeItem('systemGuardToken');
+  localStorage.removeItem('systemGuardEmail');
+  stopAutoRefresh();
+  document.getElementById('dashboard').style.display = 'none';
+  document.getElementById('loginScreen').style.display = 'flex';
+  document.getElementById('loginEmail').value = '';
+  document.getElementById('loginPassword').value = '';
+}
+
+// ==========================
+// CHECK SAVED SESSION
+// ==========================
+function checkSavedSession() {
+  const savedToken = localStorage.getItem('systemGuardToken');
+  const savedEmail = localStorage.getItem('systemGuardEmail');
+  if (savedToken) {
+    AUTH_TOKEN = savedToken;
+    document.getElementById('loginEmail').value = savedEmail || '';
+    // Try to use saved token
+    document.getElementById('loginScreen').style.display = 'none';
+    document.getElementById('dashboard').style.display = 'block';
+    document.getElementById('dashboard').dataset.ready = 'true';
+    refreshDashboard().then(success => {
+      if (success) {
+        startAutoRefresh();
+      } else {
+        // Token expired, go back to login
+        handleLogout();
+        showToast('Session expired. Please login again.', true);
+      }
+    });
+  }
+}
+
+// ==========================
+// DASHBOARD REFRESH
+// ==========================
+async function refreshDashboard() {
+  if (!AUTH_TOKEN) return false;
+
+  try {
+    // Fetch status
+    const status = await apiCall('GET', '/api/system-guard/status');
+    if (!status) return false;
+
+    updateOverview(status);
+    updateIssues(status);
+
+    // Fetch blocked IPs
+    const ipsData = await apiCall('GET', '/api/system-guard/blocked-ips');
+    if (ipsData) updateBlockedIPs(ipsData.blockedIPs, ipsData.count);
+
+    // Fetch config
+    const configData = await apiCall('GET', '/api/system-guard/config');
+    if (configData) updateConfig(configData.config);
+
+    // Fetch metrics
+    const metricsData = await apiCall('GET', '/api/system-guard/metrics');
+    if (metricsData) {
+      updateWarnings(metricsData.recentWarnings);
+      updateHealingHistory(metricsData.healingHistory);
+    }
+
+    document.getElementById('lastUpdated').textContent =
+      'Last updated: ' + new Date().toLocaleTimeString();
+
+    return true;
+  } catch (err) {
+    console.error('Refresh error:', err);
+    return false;
+  }
+}
+
+// ==========================
+// UPDATE OVERVIEW
+// ==========================
+function updateOverview(data) {
+  // Status badge
+  const badge = document.getElementById('statusBadge');
+  badge.textContent = data.status.toUpperCase();
+  badge.className = 'status-badge status-' + data.status;
+
+  // Server uptime
+  const uptime = data.uptime?.server || 0;
+  const days = Math.floor(uptime / 86400);
+  const hours = Math.floor((uptime % 86400) / 3600);
+  const mins = Math.floor((uptime % 3600) / 60);
+  document.getElementById('serverUptime').textContent = `⏱ ${days}d ${hours}h ${mins}m`;
+
+  // Memory
+  const mem = data.performance?.memory || {};
+  document.getElementById('memRSS').textContent = (mem.rss || 0) + ' MB';
+  document.getElementById('memHeap').textContent = (mem.heapUsed || 0) + ' MB';
+
+  // CPU
+  const cpu = data.performance?.cpu || {};
+  const cpuVal = cpu.usagePercent || 0;
+  const cpuEl = document.getElementById('cpuUsage');
+  cpuEl.textContent = cpuVal.toFixed(1) + '%';
+  cpuEl.className = 'stat-value ' + (cpuVal > 80 ? 'bad' : cpuVal > 50 ? 'warn' : 'good');
+
+  // Event loop
+  const lag = parseFloat(data.performance?.eventLoopLag) || 0;
+  const lagEl = document.getElementById('eventLoop');
+  lagEl.textContent = lag.toFixed(2) + 'ms';
+  lagEl.className = 'stat-value ' + (lag > 200 ? 'bad' : lag > 100 ? 'warn' : 'good');
+
+  // Response times
+  document.getElementById('avgResponse').textContent = data.performance?.avgResponseTime || '0ms';
+  document.getElementById('maxResponse').textContent = data.performance?.maxResponseTime || '0ms';
+
+  // Database
+  const db = data.database || {};
+  const dbEl = document.getElementById('dbStatus');
+  dbEl.textContent = db.connected ? '✅ Connected' : '❌ Disconnected';
+  dbEl.className = 'stat-value ' + (db.connected ? 'good' : 'bad');
+  document.getElementById('dbLastPing').textContent = db.lastPing
+    ? new Date(db.lastPing).toLocaleTimeString() : 'Never';
+  document.getElementById('dbPingDuration').textContent = db.lastPingDuration || 'N/A';
+
+  // Requests
+  const req = data.requests || {};
+  document.getElementById('reqTotal').textContent = req.total || 0;
+  document.getElementById('reqSuccess').textContent = req.successful || 0;
+  document.getElementById('reqFailed').textContent = req.failed || 0;
+
+  const errRate = parseFloat(req.errorRate) || 0;
+  const errEl = document.getElementById('reqErrorRate');
+  errEl.textContent = typeof req.errorRate === 'string' ? req.errorRate : (errRate * 100).toFixed(1) + '%';
+  errEl.className = 'stat-value ' + (errRate > 10 ? 'bad' : errRate > 5 ? 'warn' : 'good');
+
+  document.getElementById('reqActive').textContent = req.activeConnections || 0;
+}
+
+// ==========================
+// UPDATE ISSUES
+// ==========================
+function updateIssues(data) {
+  const issues = data.issues || [];
+  const container = document.getElementById('issuesList');
+  if (issues.length === 0) {
+    container.innerHTML = '<div style="color:#00c853;text-align:center;padding:20px;">✅ All systems healthy</div>';
+    return;
+  }
+  container.innerHTML = issues.map(i => `
+    <div class="issue ${i.severity}">
+      <strong>${i.severity.toUpperCase()}:</strong> ${i.message}
+    </div>
+  `).join('');
+}
+
+// ==========================
+// UPDATE WARNINGS
+// ==========================
+function updateWarnings(warnings) {
+  const container = document.getElementById('warningsList');
+  if (!warnings || warnings.length === 0) {
+    container.innerHTML = '<div style="color:#555;text-align:center;padding:10px;">No warnings</div>';
+    return;
+  }
+  container.innerHTML = warnings.slice(-10).reverse().map(w => `
+    <div class="stat-row">
+      <span class="stat-label" style="font-size:11px;">${w.type || 'Warning'}</span>
+      <span class="stat-value warn" style="font-size:11px;">${w.timestamp ? new Date(w.timestamp).toLocaleTimeString() : ''}</span>
+    </div>
+  `).join('');
+}
+
+// ==========================
+// UPDATE BLOCKED IPS
+// ==========================
+function updateBlockedIPs(ips, count) {
+  document.getElementById('blockedIPCount').textContent = count || 0;
+  const container = document.getElementById('blockedIPList');
+  if (!ips || ips.length === 0) {
+    container.innerHTML = '<div style="color:#555;text-align:center;padding:10px;">No blocked IPs</div>';
+    return;
+  }
+  container.innerHTML = ips.map(ip => `
+    <div class="ip-item">
+      <span style="font-size:14px;font-family:monospace;">${ip}</span>
+      <button class="unblock-btn" onclick="handleUnblockIP('${ip}')">Unblock</button>
+    </div>
+  `).join('');
+}
+
+// ==========================
+// UPDATE CONFIG
+// ==========================
+function updateConfig(cfg) {
+  if (!cfg) return;
+  const fw = cfg.firewall || {};
+  document.getElementById('fwEnabled').textContent = fw.enabled ? '✅ Active' : '❌ Disabled';
+  document.getElementById('fwMaxMin').textContent = fw.maxRequestsPerMinute || '-';
+  document.getElementById('fwMaxSec').textContent = fw.maxRequestsPerSecond || '-';
+}
+
+// ==========================
+// UPDATE HEALING HISTORY
+// ==========================
+function updateHealingHistory(history) {
+  const container = document.getElementById('healingHistory');
+  if (!history || history.length === 0) {
+    container.innerHTML = '<div style="color:#555;text-align:center;padding:10px;">No healing history</div>';
+    return;
+  }
+  container.innerHTML = history.slice(-5).reverse().map(h => `
+    <div class="stat-row">
+      <span class="stat-label" style="font-size:11px;">
+        ${h.timestamp ? new Date(h.timestamp).toLocaleString() : 'Unknown'}
+      </span>
+      <span class="stat-value ${h.success ? 'good' : 'bad'}" style="font-size:11px;">
+        ${h.success ? '✅ Success' : '❌ Failed'}
+      </span>
+    </div>
+    ${(h.actions || []).map(a => `
+      <div style="font-size:11px;color:#888;padding:2px 0 2px 10px;">
+        → ${a.component}: ${a.action} (${a.success ? '✅' : '❌'})
+      </div>
+    `).join('')}
+  `).join('');
+}
+
+// ==========================
+// TAB SWITCHING
+// ==========================
+function switchTab(tabName) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.tab[data-tab="${tabName}"]`).classList.add('active');
+  document.getElementById(`tab-${tabName}`).classList.add('active');
+}
+
+// ==========================
+// ACTIONS
+// ==========================
+async function handleRunDiagnosis() {
+  showToast('🔍 Running diagnosis...');
+  const result = await apiCall('POST', '/api/system-guard/diagnosis');
+  if (result) {
+    showToast('✅ Diagnosis complete');
+    await refreshDashboard();
+  }
+}
+
+async function handleRunHealing() {
+  showToast('🔧 Running healing...');
+  const result = await apiCall('POST', '/api/system-guard/healing');
+  if (result) {
+    const success = result.healing?.success;
+    showToast(success ? '✅ Healing complete' : '⚠️ Healing had some failures', !success);
+    await refreshDashboard();
+  }
+}
+
+async function handleBlockIP() {
+  const input = document.getElementById('blockIPInput');
+  const ip = input.value.trim();
+  if (!ip) { showToast('Please enter an IP address', true); return; }
+  const result = await apiCall('POST', '/api/system-guard/block-ip', { ip, reason: 'Blocked via mobile dashboard' });
+  if (result) {
+    showToast(`✅ Blocked ${ip}`);
+    input.value = '';
+    updateBlockedIPs(result.blockedIPs, result.blockedIPs?.length || 0);
+  }
+}
+
+async function handleUnblockIP(ip) {
+  const result = await apiCall('POST', '/api/system-guard/unblock-ip', { ip });
+  if (result) {
+    showToast(`✅ Unblocked ${ip}`);
+    updateBlockedIPs(result.blockedIPs, result.blockedIPs?.length || 0);
+  }
+}
+
+async function handleUnblockAllIPs() {
+  if (!confirm('Unblock all IPs?')) return;
+  const ipsData = await apiCall('GET', '/api/system-guard/blocked-ips');
+  if (!ipsData?.blockedIPs) return;
+  let count = 0;
+  for (const ip of ipsData.blockedIPs) {
+    const result = await apiCall('POST', '/api/system-guard/unblock-ip', { ip });
+    if (result) count++;
+  }
+  showToast(`✅ Unblocked ${count} IP(s)`);
+  await refreshDashboard();
+}
+
+// ==========================
+// AUTO REFRESH
+// ==========================
+function startAutoRefresh() {
+  stopAutoRefresh();
+  autoRefreshInterval = setInterval(refreshDashboard, 15000); // Every 15 seconds
+}
+
+function stopAutoRefresh() {
+  if (autoRefreshInterval) {
+    clearInterval(autoRefreshInterval);
+    autoRefreshInterval = null;
+  }
+}
+
+// ==========================
+// INIT
+// ==========================
+document.addEventListener('DOMContentLoaded', () => {
+  checkSavedSession();
+
+  // Enter key on password field triggers login
+  document.getElementById('loginPassword').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleLogin();
+  });
+});
+
+// Also handle visibility change - refresh when user returns
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && AUTH_TOKEN) {
+    refreshDashboard();
+  }
+});
+</script>
+</body>
+</html>

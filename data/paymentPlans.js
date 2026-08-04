@@ -9,6 +9,16 @@ export const paymentPlans = {
     { name: "Standard Plan", price: 760, duration: "1 month" },
     { name: "Premium Plan", price: 1200, duration: "1 month" },
   ],
+  SAT: [
+    { name: "Starter Plan", price: 500, duration: "1 month" },
+    { name: "Standard Plan", price: 800, duration: "1 month" },
+    { name: "Premium Plan", price: 1300, duration: "1 month" },
+  ],
+  GCE: [
+    { name: "Starter Plan", price: 300, duration: "1 month" },
+    { name: "Standard Plan", price: 550, duration: "1 month" },
+    { name: "Premium Plan", price: 950, duration: "1 month" },
+  ],
 };
 
 export const paymentAddOns = {
@@ -21,6 +31,15 @@ export const paymentAddOns = {
     { name: "Exams Boost", price: 300 },
     { name: "IGCSE Booster Camp", price: 900 },
     { name: "1 on 1 Private Coaching", price: 3600 },
+  ],
+  SAT: [
+    { name: "Homework Club", price: 350 },
+    { name: "SAT Exams Boost", price: 600 },
+    { name: "1 on 1 Private Coaching", price: 3600 },
+  ],
+  GCE: [
+    { name: "Homework Club", price: 250 },
+    { name: "Exams Boost Camp (O/A-Level)", price: 500 },
   ],
 };
 

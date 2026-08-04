@@ -9,10 +9,12 @@ import Teacher from "../models/teacher.js";
 import QaoUser from "../models/QaoUser.js";
 import Broadcast from "../models/Broadcast.js";
 import Subject from "../models/Subject.js";
+import AuditLog from "../models/AuditLog.js";
 
 import { sendOtpEmail } from "../utils/sendOtpEmail.js";
 import { sendCredentialsEmail } from "../utils/sendCredentialsEmail.js";
 import { adminAuth } from "../middleware/adminAuth.js";
+import { validate, schemas } from "../middleware/validate.js";
 import Users from "../models/Users.js";
 import Payment from "../models/Payment.js";
 import ClassGroup from "../models/ClassGroup.js";
@@ -28,8 +30,26 @@ export const setSocketIO = (socketIoInstance) => {
   io = socketIoInstance;
 };
 
-
-
+// ================= AUDIT LOG HELPER =================
+const logAudit = async ({ admin, action, resource, resourceId, details, req, success = true }) => {
+  try {
+    await AuditLog.create({
+      admin: admin?._id || admin?.id || null,
+      adminEmail: admin?.email || null,
+      action,
+      resource,
+      resourceId,
+      details,
+      ip: req?.ip || req?.connection?.remoteAddress || null,
+      userAgent: req?.headers?.["user-agent"] || null,
+      success,
+      method: req?.method,
+      path: req?.originalUrl,
+    });
+  } catch (err) {
+    console.error("⚠️ Audit log write failed:", err.message);
+  }
+};
 
 // ================= SEED ADMINS =================
 router.post("/seed-admins", async (req, res) => {
@@ -69,25 +89,22 @@ router.post("/seed-admins", async (req, res) => {
   }
 });
 
-
-
-
-
-
 // ================= LOGIN =================
-router.post("/login", async (req, res) => {
+router.post("/login", validate(schemas.adminLogin), async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password)
-      return res.status(400).json({ message: "Email & password required" });
-
     const admin = await Admin.findOne({ email });
-    if (!admin) return res.status(401).json({ message: "Invalid credentials" });
+    if (!admin) {
+      await logAudit({ action: "LOGIN_FAILED", details: { email }, req, success: false });
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
 
     const isMatch = await bcrypt.compare(password, admin.password);
-    if (!isMatch)
+    if (!isMatch) {
+      await logAudit({ action: "LOGIN_FAILED", details: { email }, req, success: false });
       return res.status(401).json({ message: "Invalid credentials" });
+    }
 
     const otp = Math.floor(100000 + Math.random() * 900000);
 
@@ -95,7 +112,12 @@ router.post("/login", async (req, res) => {
     admin.otpExpires = Date.now() + 5 * 60 * 1000;
     await admin.save();
 
-    await sendOtpEmail(admin.email, otp);
+    // Send OTP email asynchronously - don't block login if email fails
+    sendOtpEmail(admin.email, otp).catch((emailErr) => {
+      console.error("⚠️ OTP email failed (login still succeeds):", emailErr.message);
+    });
+
+    await logAudit({ admin, action: "LOGIN_OTP_SENT", details: { email }, req });
 
     res.json({
       success: true,
@@ -103,15 +125,13 @@ router.post("/login", async (req, res) => {
       adminId: admin._id,
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Server error" });
+    console.error("❌ Login error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
   }
 });
 
-
-
 // ================= VERIFY OTP =================
-router.post("/verify-otp", async (req, res) => {
+router.post("/verify-otp", validate(schemas.verifyOtp), async (req, res) => {
   try {
     const { adminId, otp } = req.body;
 
@@ -134,13 +154,13 @@ router.post("/verify-otp", async (req, res) => {
     admin.otpExpires = null;
     await admin.save();
 
+    await logAudit({ admin, action: "LOGIN_SUCCESS", details: { email: admin.email }, req });
+
     res.json({ success: true, token });
   } catch (err) {
     res.status(500).json({ message: "Server error" });
   }
 });
-
-
 
 // ================= DASHBOARD API =================
 router.get("/dashboard", adminAuth, async (req, res) => {
@@ -176,7 +196,6 @@ router.get("/dashboard", adminAuth, async (req, res) => {
   }
 });
 
-
 // ================= NOTIFICATIONS =================
 router.get("/notifications", adminAuth, async (req, res) => {
   try {
@@ -203,8 +222,6 @@ router.post("/notifications/:id/read", adminAuth, async (req, res) => {
     if (!broadcast) {
       return res.status(404).json({ message: "Notification not found" });
     }
-    // Broadcasts are read-only records, so we just acknowledge the read action
-    // Optionally you could track reads per admin in a separate collection
     res.json({ success: true, message: "Notification marked as read" });
   } catch (err) {
     console.error("Error marking notification as read:", err);
@@ -212,16 +229,13 @@ router.post("/notifications/:id/read", adminAuth, async (req, res) => {
   }
 });
 
-
-
 // ================= GET ALL STUDENTS =================
 router.get("/students", adminAuth, async (req, res) => {
   try {
     const students = await Student.find()
-      .select("_id fullName grade package status") // only needed fields
-      .sort({ grade: 1, package: 1, fullName: 1 }); // sort by grade, package, then name
+      .select("_id fullName grade package status")
+      .sort({ grade: 1, package: 1, fullName: 1 });
 
-    // Optionally, also return counts
     const totalStudents = students.length;
     const activeStudents = students.filter((s) => s.status === "active").length;
     const pendingStudents = students.filter((s) => s.status === "pending").length;
@@ -239,13 +253,12 @@ router.get("/students", adminAuth, async (req, res) => {
   }
 });
 
-
 // GET all students with basic info for broadcast
 router.get("/students/list", adminAuth, async (req, res) => {
   try {
     const students = await Student.find()
-      .select("_id fullName grade package") // only what you need
-      .sort({ grade: 1, package: 1 }); // sort by grade, then package
+      .select("_id fullName grade package email")
+      .sort({ grade: 1, package: 1 });
 
     res.json({ success: true, students });
   } catch (err) {
@@ -268,7 +281,6 @@ router.get("/teachers/list", adminAuth, async (req, res) => {
   }
 });
 
-
 // ================= TEACHERS STATS =================
 router.get("/teachers", adminAuth, async (req, res) => {
   try {
@@ -287,11 +299,8 @@ router.get("/teachers", adminAuth, async (req, res) => {
   }
 });
 
-
-
-
 // ================= SEND BROADCAST =================
-router.post("/broadcast", adminAuth, async (req, res) => {
+router.post("/broadcast", adminAuth, validate(schemas.broadcast), async (req, res) => {
   try {
     const { subject, message, type } = req.body;
     if (!message) return res.status(400).json({ message: "Message required" });
@@ -303,8 +312,9 @@ router.post("/broadcast", adminAuth, async (req, res) => {
       type,
     });
 
-    // Emit to all connected clients (all rooms)
     if (io) io.emit("new-broadcast", broadcast);
+
+    await logAudit({ admin: req.admin, action: "BROADCAST_SENT", resource: "Broadcast", resourceId: broadcast._id.toString(), details: { subject, type }, req });
 
     res.json({ success: true, broadcast });
   } catch (err) {
@@ -314,11 +324,9 @@ router.post("/broadcast", adminAuth, async (req, res) => {
 });
 
 // ================= BROADCAST TO SINGLE STUDENT =================
-router.post("/broadcast/student", adminAuth, async (req, res) => {
+router.post("/broadcast/student", adminAuth, validate(schemas.broadcastStudent), async (req, res) => {
   try {
     const { studentId, subject, message } = req.body;
-    if (!studentId || !message)
-      return res.status(400).json({ message: "Student ID and message required" });
 
     const broadcast = await Broadcast.create({
       sender: req.admin.id,
@@ -330,9 +338,10 @@ router.post("/broadcast/student", adminAuth, async (req, res) => {
       recipientsCount: 1,
     });
 
-    // Emit only to that student's socket room
     if (io) io.to(studentId.toString()).emit("new-broadcast", broadcast);
     console.log(`✅ Broadcast sent to student room: ${studentId}`);
+
+    await logAudit({ admin: req.admin, action: "BROADCAST_TO_STUDENT", resource: "Broadcast", resourceId: broadcast._id.toString(), details: { studentId, subject }, req });
 
     res.json({ success: true, message: "Broadcast sent to student", broadcast });
   } catch (err) {
@@ -348,7 +357,7 @@ router.post("/broadcast/all", adminAuth, async (req, res) => {
     if (!message) return res.status(400).json({ message: "Message required" });
 
     const students = await Student.find().select("_id");
-    const studentIds = students.map((s) => s._id.toString()); // ensure string
+    const studentIds = students.map((s) => s._id.toString());
 
     const broadcast = await Broadcast.create({
       sender: req.admin.id,
@@ -360,14 +369,14 @@ router.post("/broadcast/all", adminAuth, async (req, res) => {
       recipientsCount: studentIds.length,
     });
 
-    // Emit to all students individually (each joins their own room)
     if (io) {
       studentIds.forEach((id) => {
        io.emit("broadcast:new", message);
-
       });
       console.log(`✅ Broadcast sent to all students: ${studentIds.length} rooms`);
     }
+
+    await logAudit({ admin: req.admin, action: "BROADCAST_TO_ALL_STUDENTS", resource: "Broadcast", resourceId: broadcast._id.toString(), details: { subject, count: studentIds.length }, req });
 
     res.json({ success: true, message: "Broadcast sent to all students", broadcast });
   } catch (err) {
@@ -375,11 +384,6 @@ router.post("/broadcast/all", adminAuth, async (req, res) => {
     res.status(500).json({ success: false, message: "Failed to send broadcast" });
   }
 });
-
-
-
-
-
 
 // ================= BROADCAST HISTORY =================
 router.get("/broadcasts", adminAuth, async (req, res) => {
@@ -393,8 +397,6 @@ router.get("/broadcasts", adminAuth, async (req, res) => {
     res.status(500).json({ message: "Failed to fetch broadcasts" });
   }
 });
-
-
 
 // ================= QAO USERS =================
 router.get("/qao-users", adminAuth, async (req, res) => {
@@ -410,9 +412,6 @@ router.get("/qao-users", adminAuth, async (req, res) => {
   }
 });
 
-
-
-
 // ================= ALL USERS (UNIFIED) =================
 router.get("/users", adminAuth, async (req, res) => {
   try {
@@ -421,7 +420,6 @@ router.get("/users", adminAuth, async (req, res) => {
     const qaos = await QaoUser.find().select("_id fullName email status createdAt");
     const admins = await Admin.find().select("_id fullName email createdAt");
 
-    // Normalize data for frontend
     const formattedUsers = [
       ...students.map(u => ({ ...u.toObject(), role: "student", name: u.fullName })),
       ...teachers.map(u => ({ ...u.toObject(), role: "teacher", name: u.fullName })),
@@ -429,7 +427,6 @@ router.get("/users", adminAuth, async (req, res) => {
       ...admins.map(u => ({ ...u.toObject(), role: "admin", name: u.fullName, status: "active" })),
     ];
 
-    // Sort newest first
     formattedUsers.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     res.json({ success: true, users: formattedUsers });
@@ -496,6 +493,8 @@ router.delete("/users/:id/:role", adminAuth, async (req, res) => {
 
     if (!deleted) return res.status(404).json({ message: "User not found or already deleted" });
 
+    await logAudit({ admin: req.admin, action: "USER_DELETED", resource: role, resourceId: id, details: { role }, req });
+
     res.json({ success: true, message: "User deleted successfully" });
   } catch (err) {
     console.error("❌ Error deleting user:", err);
@@ -504,7 +503,7 @@ router.delete("/users/:id/:role", adminAuth, async (req, res) => {
 });
 
 // ================= CREATE USER =================
-router.post("/users/create", adminAuth, async (req, res) => {
+router.post("/users/create", adminAuth, validate(schemas.createUser), async (req, res) => {
   try {
     const {
       fullName,
@@ -517,15 +516,8 @@ router.post("/users/create", adminAuth, async (req, res) => {
       curriculum,
     } = req.body;
 
-    if (!email || !role) {
-      return res.status(400).json({
-        message: "Email and role are required",
-      });
-    }
-
     const normalizedRole = role.toLowerCase();
 
-    // 🔎 Check duplicate email across ALL collections
     const existingUser =
       (await Admin.findOne({ email })) ||
       (await Teacher.findOne({ email })) ||
@@ -538,14 +530,12 @@ router.post("/users/create", adminAuth, async (req, res) => {
       });
     }
 
-    // Auto-generate a temporary password if not provided
     const tmpPassword = providedPassword || crypto.randomBytes(4).toString("hex").toUpperCase() + "@" + Math.floor(100 + Math.random() * 900);
     const hashedPassword = await bcrypt.hash(tmpPassword, 10);
 
     let newUser;
     let generatedUserId = "";
 
-    // ================= ADMIN =================
     if (normalizedRole === "admin") {
       newUser = await Admin.create({
         fullName,
@@ -553,10 +543,7 @@ router.post("/users/create", adminAuth, async (req, res) => {
         password: hashedPassword,
         role: "MINOR_ADMIN",
       });
-    }
-
-    // ================= TEACHER =================
-    else if (normalizedRole === "teacher") {
+    } else if (normalizedRole === "teacher") {
       if (!phone || !experience || !curriculum) {
         return res.status(400).json({
           message: "Teacher requires phone, experience and curriculum",
@@ -566,13 +553,11 @@ router.post("/users/create", adminAuth, async (req, res) => {
       const teacherCount = await Teacher.countDocuments();
       generatedUserId = `SM-TUT-${String(teacherCount + 1).padStart(6, "0")}`;
 
-      // Auto-assign subjects based on curriculum
       const catalog = curriculumCatalog[curriculum];
       const subjectDocs = catalog
         ? await Subject.find({ name: { $in: catalog.subjects }, curriculum }).lean()
         : [];
 
-      // If no exact matches, just create subject references by name
       const subjectIds = (catalog?.subjects || []).map((name) => {
         const found = subjectDocs.find((s) => s.name === name);
         return found ? found._id : null;
@@ -591,29 +576,23 @@ router.post("/users/create", adminAuth, async (req, res) => {
         status: "active",
         subjectsTeaching: subjectIds,
       });
-    }
+    } else if (normalizedRole === "qao" || normalizedRole === "tutor-manager") {
+      const qaoCount = await QaoUser.countDocuments();
+      generatedUserId = `SM-TM-${String(qaoCount + 1).padStart(6, "0")}`;
 
-    // ================= TUTOR MANAGER (was QAO) =================
-   else if (normalizedRole === "qao" || normalizedRole === "tutor-manager") {
-     const qaoCount = await QaoUser.countDocuments();
-     generatedUserId = `SM-TM-${String(qaoCount + 1).padStart(6, "0")}`;
-
-     newUser = await QaoUser.create({
-       name: fullName || name,
-       email,
-       password: hashedPassword,
-       userId: generatedUserId,
-       role: "qao",
-     });
-   }
-
-    else {
+      newUser = await QaoUser.create({
+        name: fullName || name,
+        email,
+        password: hashedPassword,
+        userId: generatedUserId,
+        role: "qao",
+      });
+    } else {
       return res.status(400).json({
         message: "Invalid role selected",
       });
     }
 
-    // Send credentials email (non-blocking - don't fail if email fails)
     try {
       const displayRole = normalizedRole === "qao" || normalizedRole === "tutor-manager" ? "tutor-manager" : "teacher";
       await sendCredentialsEmail({
@@ -627,13 +606,14 @@ router.post("/users/create", adminAuth, async (req, res) => {
       console.warn("⚠️ Credentials email failed, but user was created:", emailErr.message);
     }
 
+    await logAudit({ admin: req.admin, action: "USER_CREATED", resource: normalizedRole, resourceId: newUser._id.toString(), details: { email, role: normalizedRole }, req });
+
     res.status(201).json({
       success: true,
       message: "User created successfully. Credentials sent via email.",
       user: newUser,
       credentialsSent: true,
     });
-
   } catch (error) {
     console.error("❌ Error creating user:", error);
     res.status(500).json({
@@ -646,20 +626,19 @@ router.post("/users/create", adminAuth, async (req, res) => {
 router.get("/payments", adminAuth, async (req, res) => {
   try {
     const payments = await Payment.find()
-      .select("-__v") // remove unnecessary field
+      .select("-__v")
       .populate({
         path: "studentId",
         select: "fullName email grade subscriptionExpiry accountStatus",
       })
       .sort({ createdAt: -1 })
-      .lean(); // improves performance for read-only data
+      .lean();
 
     res.status(200).json({
       success: true,
       count: payments.length,
       payments,
     });
-
   } catch (error) {
     console.error("❌ Error fetching payments:", error);
     res.status(500).json({
@@ -668,8 +647,6 @@ router.get("/payments", adminAuth, async (req, res) => {
     });
   }
 });
-
-
 
 // ================= CONFIRM PAYMENT =================
 router.put("/payments/:id/confirm", adminAuth, async (req, res) => {
@@ -684,18 +661,15 @@ router.put("/payments/:id/confirm", adminAuth, async (req, res) => {
 
     const startDate = new Date();
     const endDate = new Date();
-    endDate.setMonth(endDate.getMonth() + 1); // 1 month subscription
+    endDate.setMonth(endDate.getMonth() + 1);
 
-    // Update payment
     payment.status = "confirmed";
     payment.subscriptionStart = startDate;
     payment.subscriptionEnd = endDate;
-    payment.reviewedBy = req.admin._id; // if adminAuth attaches admin
+    payment.reviewedBy = req.admin._id;
     await payment.save();
 
-    // Update student using studentId
     const student = await Student.findById(payment.studentId);
-
     if (student) {
       student.subscriptionStatus = "active";
       student.accountStatus = "active";
@@ -704,18 +678,18 @@ router.put("/payments/:id/confirm", adminAuth, async (req, res) => {
       await student.save();
     }
 
-    // 🔔 Notify dashboard
     if (io) {
       io.emit("payment:confirmed", {
         studentName: student?.fullName,
       });
     }
 
+    await logAudit({ admin: req.admin, action: "PAYMENT_CONFIRMED", resource: "Payment", resourceId: payment._id.toString(), details: { studentId: payment.studentId?.toString() }, req });
+
     res.json({
       success: true,
       message: "Payment confirmed & student activated",
     });
-
   } catch (error) {
     console.error("❌ Error confirming payment:", error);
     res.status(500).json({
@@ -723,7 +697,6 @@ router.put("/payments/:id/confirm", adminAuth, async (req, res) => {
     });
   }
 });
-
 
 // ================= CLASS GROUPS =================
 const CLASS_GROUP_SUBJECTS = ["English", "Maths", "Science"];
@@ -740,7 +713,6 @@ router.get("/class-groups/options", adminAuth, async (req, res) => {
     ]);
     const formattedStudents = students.map((student) => ({
       ...student,
-      // Older registrations may have subject references but no subjectNames.
       subjectNames: student.subjectNames?.length
         ? student.subjectNames
         : student.subjects?.length
@@ -766,22 +738,11 @@ router.get("/class-groups", adminAuth, async (req, res) => {
   }
 });
 
-// Split selected students into named groups of exactly 5 or 10 (apart from a
-// final smaller group), e.g. GESA1, GESA2.
-router.post("/class-groups/generate", adminAuth, async (req, res) => {
+router.post("/class-groups/generate", adminAuth, validate(schemas.classGroupGenerate), async (req, res) => {
   try {
     const { curriculum, grade, subject, capacity, studentIds, codePrefix } = req.body;
     const size = Number(capacity);
-    if (!curriculum || !grade || !subject || ![1, 5, 10].includes(size) || !Array.isArray(studentIds) || !studentIds.length || !codePrefix) {
-      return res.status(400).json({ message: "Curriculum, grade, subject, class size (1, 5, or 10), class prefix, and students are required." });
-    }
-    if (!CLASS_GROUP_SUBJECTS.includes(subject)) {
-      return res.status(400).json({ message: "Subject must be English, Maths, or Science." });
-    }
 
-    // The admin UI has already filtered this list by curriculum, grade, and
-    // subject. Fetch by the submitted IDs here so legacy field variations
-    // cannot reject valid students with a misleading 400 response.
     const students = await Student.find({ _id: { $in: studentIds } }).select("_id");
     if (students.length !== studentIds.length) {
       return res.status(400).json({ message: "One or more selected students could not be found. Refresh the list and try again." });
@@ -805,6 +766,9 @@ router.post("/class-groups/generate", adminAuth, async (req, res) => {
       groups.push({ code: `${codePrefix}${sequence}`.toUpperCase(), curriculum, grade, subject, capacity: size, students: groupStudents, status: groupStudents.length === size ? "full" : "active" });
     }
     const created = await ClassGroup.insertMany(groups);
+
+    await logAudit({ admin: req.admin, action: "CLASS_GROUPS_GENERATED", resource: "ClassGroup", details: { curriculum, grade, subject, count: created.length }, req });
+
     res.status(201).json({ message: `${created.length} class group(s) created.`, groups: created });
   } catch (error) {
     console.error("Class group generation error:", error);
@@ -812,12 +776,15 @@ router.post("/class-groups/generate", adminAuth, async (req, res) => {
   }
 });
 
-router.put("/class-groups/:id/teacher", adminAuth, async (req, res) => {
+router.put("/class-groups/:id/teacher", adminAuth, validate(schemas.assignTeacher), async (req, res) => {
   try {
     const teacher = await Teacher.findById(req.body.teacherId);
     if (!teacher) return res.status(404).json({ message: "Teacher not found." });
     const group = await ClassGroup.findByIdAndUpdate(req.params.id, { teacher: teacher._id }, { new: true }).populate("teacher", "fullName email");
     if (!group) return res.status(404).json({ message: "Class group not found." });
+
+    await logAudit({ admin: req.admin, action: "CLASS_GROUP_TEACHER_ASSIGNED", resource: "ClassGroup", resourceId: group._id.toString(), details: { teacherId: req.body.teacherId }, req });
+
     res.json({ group });
   } catch (error) {
     res.status(500).json({ message: "Unable to assign the teacher." });
@@ -842,10 +809,50 @@ router.post("/payments/sync-paystack", adminAuth, async (req, res) => {
         updated += 1;
       }
     }
+
+    await logAudit({ admin: req.admin, action: "PAYSTACK_SYNC", details: { updated }, req });
+
     res.json({ message: `Paystack sync complete. ${updated} payment(s) updated.`, updated });
   } catch (error) {
     console.error("Paystack sync error:", error);
     res.status(502).json({ message: error.message || "Unable to sync Paystack payments." });
+  }
+});
+
+// ================= AUDIT LOG ENDPOINT =================
+router.get("/audit-logs", adminAuth, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const skip = (page - 1) * limit;
+
+    const filter = {};
+    if (req.query.action) filter.action = req.query.action;
+    if (req.query.adminId) filter.admin = req.query.adminId;
+
+    const [logs, total] = await Promise.all([
+      AuditLog.find(filter)
+        .populate("admin", "fullName email")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      AuditLog.countDocuments(filter),
+    ]);
+
+    res.json({
+      success: true,
+      logs,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error) {
+    console.error("❌ Error fetching audit logs:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch audit logs" });
   }
 });
 

@@ -5,6 +5,24 @@ import dotenv from "dotenv";
 dotenv.config();
 
 // ==========================
+// GLOBAL UNHANDLED REJECTION HANDLER
+// Prevents server crash on unhandled promise rejections
+// ==========================
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("❌ UNHANDLED PROMISE REJECTION:", reason instanceof Error ? reason.message : reason);
+  if (reason instanceof Error && reason.stack) {
+    console.error(reason.stack);
+  }
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("❌ UNCAUGHT EXCEPTION:", error.message);
+  console.error(error.stack);
+  // Don't exit immediately - let the process continue if possible
+  // The process will exit naturally if the error is fatal
+});
+
+// ==========================
 // IMPORTS
 // ==========================
 import express from "express";
@@ -18,6 +36,8 @@ import rateLimit from "express-rate-limit";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import connectDB from "./config/db.js";
+import { init as initSystemGuard } from "./services/systemGuard.js";
+import systemGuardRoutes from "./routes/systemGuardRoutes.js";
 
 // Routes
 import studentRoutes from "./routes/studentRoutes.js";
@@ -30,7 +50,9 @@ import classGroupRoutes from "./routes/classGroupRoutes.js";
 import authRoutes from "./routes/authRoutes.js";
 import resourceRoutes from "./routes/resourceRoutes.js";
 import messageRoutes from "./routes/messageRoutes.js";
+import broadcastRoutes from "./routes/broadcastRoutes.js";
 import { setSocketIO as setBroadcastSocket } from "./Controllers/broadcasting.js";
+import pushNotificationRoutes from "./routes/pushNotificationRoutes.js";
 
 // ==========================
 // VALIDATE ENV VARIABLES
@@ -55,6 +77,7 @@ const httpServer = createServer(app);
 // CORS CONFIG
 // ==========================
 const allowedOrigins = [
+  "http://localhost:5000",
   "http://localhost:5173",
   "http://localhost:5174",
   "https://studiesmasters-frontend.onrender.com",
@@ -81,7 +104,18 @@ app.use(
 // ==========================
 // SECURITY MIDDLEWARE
 // ==========================
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: false, // Disabled because system guard uses inline scripts
+  crossOriginEmbedderPolicy: false,
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true,
+  },
+  referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+  noSniff: true,
+  xssFilter: true,
+}));
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -91,11 +125,20 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Global API rate limiter (applied to all /api/ routes)
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+  message: { message: "Too many requests, please try again later" },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // ==========================
-// BODY PARSER
+// BODY PARSER (with size limits)
 // ==========================
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
 // ==========================
 // STATIC FILES
@@ -103,6 +146,38 @@ app.use(express.urlencoded({ extended: true }));
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
+// ==========================
+// SYSTEM GUARD DASHBOARD (served without helmet CSP to allow inline scripts)
+// ==========================
+app.get("/system-guard.html", (req, res) => {
+  res.setHeader("Content-Security-Policy",
+    "default-src 'self'; " +
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
+    "style-src 'self' 'unsafe-inline'; " +
+    "connect-src 'self' *; " +
+    "img-src 'self' data:; " +
+    "font-src 'self' data:;"
+  );
+  res.sendFile(path.join(__dirname, "public", "system-guard.html"));
+});
+
+// ==========================
+// FAVICON (prevent 404)
+// ==========================
+app.get("/favicon.ico", (req, res) => {
+  res.status(204).end();
+});
+
+// ==========================
+// SYSTEM GUARD (Firewall + Self-Diagnosis + Self-Healing)
+// ==========================
+initSystemGuard(app);
+
+// ==========================
+// SECURE SYSTEM GUARD API ROUTES (protected by admin auth)
+// ==========================
+app.use("/api/system-guard", systemGuardRoutes);
 
 // ==========================
 // ROUTES
@@ -118,6 +193,8 @@ app.use("/api/qao", qaoRoutes);
 app.use("/api/class-groups", classGroupRoutes);
 app.use("/api/resources", resourceRoutes);
 app.use("/api/messages", messageRoutes);
+app.use("/api/admin/broadcasts", broadcastRoutes);
+app.use("/api/notifications", pushNotificationRoutes);
 
 app.get("/", (req, res) => {
   res.send("🚀 Studiesmasters API is running");

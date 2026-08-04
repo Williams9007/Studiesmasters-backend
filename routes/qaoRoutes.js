@@ -117,6 +117,70 @@ router.post("/broadcast", verifyQao, async (req, res) => {
   }
 });
 
+// -------------------- Broadcast to a Class Group --------------------
+// Used when a teacher is unavailable (e.g. sick) so the tutor manager can
+// notify the class that a substitute will be covering the lesson.
+router.post("/broadcast/class", verifyQao, async (req, res) => {
+  try {
+    const { classGroupId, subject, message } = req.body;
+    const senderId = req.user._id;
+
+    if (!classGroupId) {
+      return res.status(400).json({ success: false, message: "Class group is required" });
+    }
+    if (!subject?.trim() || !message?.trim()) {
+      return res.status(400).json({ success: false, message: "Subject and message are required" });
+    }
+
+    const classGroup = await ClassGroup.findById(classGroupId);
+    if (!classGroup) {
+      return res.status(404).json({ success: false, message: "Class group not found" });
+    }
+
+    const studentIds = classGroup.students || [];
+    if (studentIds.length === 0) {
+      return res.status(400).json({ success: false, message: "This class group has no students" });
+    }
+
+    // Create a Notification for each student in the class
+    const notifications = studentIds.map((studentId) => ({
+      userId: studentId,
+      type: "broadcast",
+      message: subject ? `${subject} — ${message}` : message,
+      read: false,
+    }));
+    await Notification.insertMany(notifications);
+
+    // Also create Message records so it appears in sent history
+    const messageDocs = await Message.insertMany(
+      studentIds.map((studentId) => ({
+        sender: senderId,
+        receiver: studentId,
+        subject,
+        body: message,
+        senderRole: "qao",
+        receiverRole: "student",
+      }))
+    );
+
+    await MessageRecipient.insertMany(
+      messageDocs.map((m) => ({
+        message: m._id,
+        recipient: m.receiver,
+      }))
+    );
+
+    res.json({
+      success: true,
+      message: `Broadcast sent to ${studentIds.length} student(s) in ${classGroup.code}`,
+      recipientCount: studentIds.length,
+    });
+  } catch (err) {
+    console.error("Broadcast to class error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 // -------------------- Fetch Sent / Inbox Messages --------------------
 router.get("/sent", verifyQao, async (req, res) => {
   try {
