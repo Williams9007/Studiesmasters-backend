@@ -21,7 +21,7 @@ const broadcastSchema = new mongoose.Schema(
 
     type: {
       type: String,
-      enum: ["students", "teachers", "qaos", "all", "single"],
+      enum: ["students", "teachers", "qaos", "tutormanagers", "all", "single"],
       default: "all",
     },
 
@@ -49,6 +49,19 @@ const broadcastSchema = new mongoose.Schema(
     recipientsCount: {
       type: Number,
       default: 0,
+    },
+
+    // Optional link attached by admin
+    link: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+
+    // Uploaded attachment (multer stores the file path)
+    attachment: {
+      type: String,
+      default: null,
     },
   },
   { timestamps: true }

@@ -140,3 +140,41 @@ export const sendNotification = async (req, res) => {
 export const getSubscriptionCount = (req, res) => {
   res.json({ count: subscriptions.size });
 };
+
+/**
+ * Send a push notification to ALL subscribed browsers.
+ * Reusable programmatically (e.g. by the System Guard alert service).
+ * Returns { sent, errors, totalSubscriptions }.
+ */
+export const sendPushToAll = async (title, body, url = "/") => {
+  if (!title || !body) {
+    throw new Error("Title and body are required");
+  }
+
+  const payload = JSON.stringify({ title, body, url });
+  const results = [];
+  const deadEndpoints = [];
+
+  for (const sub of subscriptions) {
+    try {
+      await webpush.sendNotification(sub, payload);
+      results.push({ endpoint: sub.endpoint, status: "sent" });
+    } catch (err) {
+      if (err.statusCode === 410 || err.statusCode === 404) {
+        deadEndpoints.push(sub.endpoint);
+        subscriptions.delete(sub);
+      }
+      results.push({ endpoint: sub.endpoint, status: "error", error: err.message });
+    }
+  }
+
+  if (deadEndpoints.length) {
+    console.log(`🧹 Cleaned up ${deadEndpoints.length} dead subscriptions`);
+  }
+
+  return {
+    sent: results.filter((r) => r.status === "sent").length,
+    errors: results.filter((r) => r.status === "error").length,
+    totalSubscriptions: subscriptions.size,
+  };
+};

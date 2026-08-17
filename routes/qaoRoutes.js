@@ -307,10 +307,39 @@ router.get("/class-groups", verifyQao, async (req, res) => {
 
 router.get("/notifications", verifyQao, async (req, res) => {
   try {
-    const notifications = await Notification.find({ userId: req.user._id, read: false }).sort({ createdAt: -1 });
+    const notifications = await Notification.find({ userId: req.user._id }).sort({ createdAt: -1 });
     res.json({ success: true, notifications });
   } catch (err) {
     console.error("Fetch notifications error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+router.patch("/notifications/:id/read", verifyQao, async (req, res) => {
+  try {
+    const notification = await Notification.findOneAndUpdate(
+      { _id: req.params.id, userId: req.user._id },
+      { read: true },
+      { new: true }
+    );
+
+    if (!notification) {
+      return res.status(404).json({ success: false, message: "Notification not found" });
+    }
+
+    res.json({ success: true, notification });
+  } catch (err) {
+    console.error("Mark notification as read error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+router.patch("/notifications/read-all", verifyQao, async (req, res) => {
+  try {
+    await Notification.updateMany({ userId: req.user._id, read: false }, { read: true });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Mark all notifications as read error:", err);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });

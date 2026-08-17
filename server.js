@@ -13,11 +13,25 @@ process.on("unhandledRejection", (reason, promise) => {
   if (reason instanceof Error && reason.stack) {
     console.error(reason.stack);
   }
+  // Alert the admin about the unhandled rejection
+  sendSystemAlert({
+    title: "⚠️ Unhandled Promise Rejection",
+    message: `An unhandled promise rejection occurred:\n\n${reason instanceof Error ? reason.stack || reason.message : String(reason)}`,
+    key: `unhandled-rejection-${Date.now()}`,
+    severity: "WARNING",
+  });
 });
 
 process.on("uncaughtException", (error) => {
   console.error("❌ UNCAUGHT EXCEPTION:", error.message);
   console.error(error.stack);
+  // Alert the admin about the uncaught exception
+  sendSystemAlert({
+    title: "🚨 Uncaught Exception",
+    message: `An uncaught exception occurred:\n\n${error.stack || error.message}`,
+    key: `uncaught-exception-${Date.now()}`,
+    severity: "CRITICAL",
+  });
   // Don't exit immediately - let the process continue if possible
   // The process will exit naturally if the error is fatal
 });
@@ -37,6 +51,7 @@ import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import connectDB from "./config/db.js";
 import { init as initSystemGuard } from "./services/systemGuard.js";
+import { initSystemAlerts, sendSystemAlert } from "./services/systemAlertService.js";
 import systemGuardRoutes from "./routes/systemGuardRoutes.js";
 
 // Routes
@@ -107,6 +122,7 @@ app.use(
 app.use(helmet({
   contentSecurityPolicy: false, // Disabled because system guard uses inline scripts
   crossOriginEmbedderPolicy: false,
+  frameguard: false, // Allow system-guard.html to be embedded in the frontend admin dashboard iframe
   hsts: {
     maxAge: 31536000,
     includeSubDomains: true,
@@ -157,7 +173,8 @@ app.get("/system-guard.html", (req, res) => {
     "style-src 'self' 'unsafe-inline'; " +
     "connect-src 'self' *; " +
     "img-src 'self' data:; " +
-    "font-src 'self' data:;"
+    "font-src 'self' data:; " +
+    "frame-ancestors 'self' https://studiesmasters-frontend.onrender.com https://studiesmasters.com http://localhost:5173 http://localhost:5174;"
   );
   res.sendFile(path.join(__dirname, "public", "system-guard.html"));
 });
@@ -173,6 +190,11 @@ app.get("/favicon.ico", (req, res) => {
 // SYSTEM GUARD (Firewall + Self-Diagnosis + Self-Healing)
 // ==========================
 initSystemGuard(app);
+
+// ==========================
+// SYSTEM ALERT SERVICE (email + push alerts on downtime/errors)
+// ==========================
+initSystemAlerts();
 
 // ==========================
 // SECURE SYSTEM GUARD API ROUTES (protected by admin auth)

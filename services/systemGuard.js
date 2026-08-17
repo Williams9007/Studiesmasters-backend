@@ -27,7 +27,7 @@ const CONFIG = {
       /(<script|<\/script|javascript:|onerror=|onload=|onclick=)/i,
       /(\b(rm\s+-rf|wget\s+|curl\s+|powershell\s+|cmd\.exe|bash\s+|sh\s+-c)\b)/i,
       /(%27|%22|%3C|%3E|%3B|%00)/i,
-      /(\b(admin|root|system|config|passwd|shadow)\b.*\b(=|:|\s))/i,
+      /(\b(admin|root|system|config|passwd|shadow)\b\s*[=:]\s*\S+)/i,
     ],
     blockedIPs: new Set(), // Permanent manual blocks (only via system-guard UI)
     autoBlockDurationMs: 15 * 60 * 1000, // Auto-unblock firewall-blocked IPs after 15 minutes
@@ -173,7 +173,7 @@ const unblockIP = (ip) => {
  * Check request for suspicious patterns
  */
 const checkSuspiciousPatterns = (body, url, headers) => {
-  const combined = JSON.stringify({ body, url, headers });
+  const combined = JSON.stringify({ body, url });
   for (const pattern of CONFIG.firewall.suspiciousPatterns) {
     if (pattern.test(combined)) {
       return true;
@@ -231,9 +231,12 @@ const checkRateLimit = (ip) => {
 // and JWT-protected admin API routes which already use adminAuth middleware)
 const BYPASS_PATHS = [
   "/api/admin", // Admin routes are JWT-protected via adminAuth middleware
+  "/api/qao", // QAO/Tutor Manager routes are JWT-protected via verifyQao middleware
+  "/api/teachers", // Teacher routes
   "/api/payments", // Payment routes (Paystack initialize/verify) must not be firewall-blocked
   "/api/students", // Student routes (payment-summary, etc.)
-  "/api/system-guard",
+  "/api/system-guard", // System guard dashboard routes
+  "/api/system", // System guard unblock/block API endpoints (must be accessible even when IP is blocked)
   "/system-guard.html",
   "/favicon.ico",
   "/health",

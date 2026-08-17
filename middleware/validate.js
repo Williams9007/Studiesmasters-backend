@@ -107,4 +107,14 @@ export const schemas = {
   assignTeacher: z.object({
     teacherId: z.string().min(1, "Teacher ID is required"),
   }),
+
+  // Add students to an existing class group
+  addStudentsToGroup: z.object({
+    studentIds: z.array(z.string()).min(1, "At least one student is required"),
+  }),
+
+  // Remove a student from an existing class group
+  removeStudentFromGroup: z.object({
+    studentId: z.string().min(1, "Student ID is required"),
+  }),
 };

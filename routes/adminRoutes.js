@@ -791,6 +791,84 @@ router.put("/class-groups/:id/teacher", adminAuth, validate(schemas.assignTeache
   }
 });
 
+// ================= ADD STUDENTS TO CLASS GROUP =================
+router.post("/class-groups/:id/students", adminAuth, validate(schemas.addStudentsToGroup), async (req, res) => {
+  try {
+    const { studentIds } = req.body;
+    const group = await ClassGroup.findById(req.params.id);
+    if (!group) return res.status(404).json({ message: "Class group not found." });
+
+    const students = await Student.find({ _id: { $in: studentIds } }).select("_id");
+    if (students.length !== studentIds.length) {
+      return res.status(400).json({ message: "One or more selected students could not be found. Refresh the list and try again." });
+    }
+
+    const matchedStudentIds = students.map((student) => student._id);
+    const alreadyGrouped = await ClassGroup.findOne({
+      _id: { $ne: group._id },
+      curriculum: group.curriculum,
+      grade: group.grade,
+      subject: group.subject,
+      students: { $in: matchedStudentIds },
+    }).select("code");
+    if (alreadyGrouped) {
+      return res.status(400).json({ message: `One or more selected students are already in ${alreadyGrouped.code}.` });
+    }
+
+    const currentIds = group.students.map((id) => id.toString());
+    const newIds = matchedStudentIds.filter((id) => !currentIds.includes(id.toString()));
+    const duplicates = studentIds.length - newIds.length;
+    if (newIds.length === 0) {
+      return res.status(400).json({ message: "All selected students are already in this group." });
+    }
+
+    if (group.students.length + newIds.length > group.capacity) {
+      return res.status(400).json({ message: `This group is at capacity (${group.capacity}). Remove a student before adding more.` });
+    }
+
+    group.students.push(...newIds);
+    if (group.students.length >= group.capacity) group.status = "full";
+    else if (group.status === "full") group.status = "active";
+    await group.save();
+
+    const populated = await ClassGroup.findById(group._id).populate("teacher", "fullName email").populate("students", "fullName email phone grade");
+
+    await logAudit({ admin: req.admin, action: "CLASS_GROUP_STUDENTS_ADDED", resource: "ClassGroup", resourceId: group._id.toString(), details: { studentIds: newIds.map((id) => id.toString()), added: newIds.length, duplicates: duplicates }, req });
+
+    res.json({ message: `${newIds.length} student(s) added to ${group.code}.${duplicates ? ` ${duplicates} already existed.` : ""}`, group: populated });
+  } catch (error) {
+    console.error("Add students to group error:", error);
+    res.status(500).json({ message: "Unable to add students to the group." });
+  }
+});
+
+// ================= REMOVE STUDENT FROM CLASS GROUP =================
+router.delete("/class-groups/:id/students/:studentId", adminAuth, async (req, res) => {
+  try {
+    const { id, studentId } = req.params;
+    const group = await ClassGroup.findById(id);
+    if (!group) return res.status(404).json({ message: "Class group not found." });
+
+    const currentIds = group.students.map((sid) => sid.toString());
+    if (!currentIds.includes(studentId)) {
+      return res.status(400).json({ message: "This student is not in the group." });
+    }
+
+    group.students = group.students.filter((sid) => sid.toString() !== studentId);
+    if (group.status === "full" && group.students.length < group.capacity) group.status = "active";
+    await group.save();
+
+    const populated = await ClassGroup.findById(group._id).populate("teacher", "fullName email").populate("students", "fullName email phone grade");
+
+    await logAudit({ admin: req.admin, action: "CLASS_GROUP_STUDENT_REMOVED", resource: "ClassGroup", resourceId: group._id.toString(), details: { studentId }, req });
+
+    res.json({ message: "Student removed from the group.", group: populated });
+  } catch (error) {
+    console.error("Remove student from group error:", error);
+    res.status(500).json({ message: "Unable to remove the student from the group." });
+  }
+});
+
 // Admin can reconcile local Paystack payments with Paystack's transaction API.
 router.post("/payments/sync-paystack", adminAuth, async (req, res) => {
   try {

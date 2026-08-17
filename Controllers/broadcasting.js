@@ -20,13 +20,15 @@ export const setSocketIO = (socketInstance) => {
  */
 export const sendBroadcast = async (req, res) => {
   try {
-    const { subject, message, recipientType, recipientId, recipientModel, recipients } = req.body;
+    const { subject, message, link, recipientType, recipientId, recipientModel, recipients } = req.body;
 
     if (!message?.trim())
       return res.status(400).json({ message: "Message cannot be empty." });
 
-    // Handle attachment if uploaded via multer
-    const attachment = req.file ? req.file.path : null;
+    // Handle attachment if uploaded via multer — store the web URL path
+    // (multer returns an absolute filesystem path, so normalize to /uploads/...)
+    const attachment = req.file ? `/uploads/broadcasts/${req.file.filename}` : null;
+    const optionalLink = link?.trim() || null;
 
     // --- Determine recipients ---
     let usersToNotify = [];
@@ -80,6 +82,7 @@ export const sendBroadcast = async (req, res) => {
       recipientModel: modelName || undefined,
       type: recipientType || "all",
       recipientsCount: usersToNotify.length,
+      link: optionalLink,
       attachment,
     });
     await broadcast.save();
@@ -90,6 +93,8 @@ export const sendBroadcast = async (req, res) => {
       userId: uId,
       type: "broadcast",
       message: subject ? `${subject} — ${message}` : message,
+      link: optionalLink,
+      attachment,
       read: false,
     }));
     await NotificationModel.insertMany(notifications);
@@ -105,6 +110,8 @@ export const sendBroadcast = async (req, res) => {
         message: broadcast.message,
         sender: broadcast.sender, // fullName & email
         recipients: broadcast.recipients.map((id) => id.toString()),
+        link: broadcast.link || null,
+        attachment: broadcast.attachment || null,
         createdAt: broadcast.createdAt.toISOString(),
         updatedAt: broadcast.updatedAt.toISOString(),
       };
