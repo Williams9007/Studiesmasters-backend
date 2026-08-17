@@ -14,10 +14,12 @@ export const validate = (schema) => {
       req.body = parsed; // Replace with sanitized/coerced values
       next();
     } catch (error) {
-      if (error instanceof z.ZodError) {
-        const messages = error.issues.map((e) => ({
-          field: e.path.join("."),
-          message: e.message,
+      // Handle Zod v3 and v4 error formats
+      const issues = error?.issues || error?.errors;
+      if (issues && Array.isArray(issues)) {
+        const messages = issues.map((e) => ({
+          field: (e.path || []).join("."),
+          message: e.message || "Invalid value",
         }));
         return res.status(400).json({
           success: false,
@@ -25,7 +27,11 @@ export const validate = (schema) => {
           errors: messages,
         });
       }
-      next(error);
+      // Fallback: treat as validation error rather than crashing
+      return res.status(400).json({
+        success: false,
+        message: error?.message || "Validation failed",
+      });
     }
   };
 };

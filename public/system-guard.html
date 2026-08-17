@@ -555,7 +555,17 @@ async function handleLogin() {
 
     const loginData = await loginRes.json();
     if (!loginData.success) {
-      errEl.textContent = loginData.message || 'Login failed';
+      // Show detailed error info for debugging
+      const detail = loginData.errors
+        ? loginData.errors.map((e) => `${e.field}: ${e.message}`).join('; ')
+        : '';
+      errEl.textContent = (loginData.message || 'Login failed') + (detail ? ` — ${detail}` : '');
+      btn.disabled = false;
+      btn.textContent = '🔐 Login';
+      return;
+    }
+    if (!loginRes.ok) {
+      errEl.textContent = `Server error (${loginRes.status}): ${loginData.message || 'Unknown error'}`;
       btn.disabled = false;
       btn.textContent = '🔐 Login';
       return;
