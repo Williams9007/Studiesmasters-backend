@@ -95,6 +95,8 @@ const allowedOrigins = [
   "http://localhost:5000",
   "http://localhost:5173",
   "http://localhost:5174",
+  // The System Guard page is served by this API and makes authenticated API calls itself.
+  "https://studiesmasters-backend.onrender.com",
   "https://studiesmasters-frontend.onrender.com",
   "https://studiesmasters.com",
   "https://williams9007.github.io",
