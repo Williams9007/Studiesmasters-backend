@@ -235,6 +235,7 @@ const BYPASS_PATHS = [
   "/api/teachers", // Teacher routes
   "/api/payments", // Payment routes (Paystack initialize/verify) must not be firewall-blocked
   "/api/students", // Student routes (payment-summary, etc.)
+  "/api/moodle", // Moodle SSO routes are JWT-protected via studentAuth/verifyTeacher
   "/api/system-guard", // System guard dashboard routes
   "/api/system", // System guard unblock/block API endpoints (must be accessible even when IP is blocked)
   "/system-guard.html",
