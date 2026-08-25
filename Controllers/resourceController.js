@@ -32,6 +32,7 @@ export const getResources = async (req, res) => {
       .sort({ createdAt: -1 });
     res.json({ success: true, resources });
   } catch (err) {
+    console.error("❌ Failed to fetch resources:", err);
     res.status(500).json({ message: "Failed to fetch resources" });
   }
 };
@@ -44,6 +45,7 @@ export const getPendingResources = async (req, res) => {
       .sort({ createdAt: -1 });
     res.json({ success: true, resources });
   } catch (err) {
+    console.error("❌ Failed to fetch pending resources:", err);
     res.status(500).json({ message: "Failed to fetch pending resources" });
   }
 };
@@ -62,13 +64,20 @@ export const submitResource = async (req, res) => {
       teacher: teacherId,
       subject,
       curriculum,
-      classGroup: classGroupId,
+      // Only set classGroup if a valid ObjectId string was provided.
+      // An empty string "" would cause a Mongoose CastError on save.
+      classGroup: classGroupId || undefined,
     });
 
     await resource.populate("teacher", "fullName email");
     res.status(201).json({ success: true, resource });
   } catch (err) {
-    res.status(500).json({ message: "Failed to submit resource" });
+    console.error("❌ Failed to submit resource:", err);
+    // Return the actual error message in development for easier debugging
+    res.status(500).json({
+      message: "Failed to submit resource",
+      ...(process.env.NODE_ENV === "development" && { error: err.message }),
+    });
   }
 };
 
@@ -93,6 +102,7 @@ export const reviewResource = async (req, res) => {
 
     res.json({ success: true, resource });
   } catch (err) {
+    console.error("❌ Failed to review resource:", err);
     res.status(500).json({ message: "Failed to review resource" });
   }
 };
@@ -106,6 +116,7 @@ export const getMyResources = async (req, res) => {
       .sort({ createdAt: -1 });
     res.json({ success: true, resources });
   } catch (err) {
+    console.error("❌ Failed to fetch teacher resources:", err);
     res.status(500).json({ message: "Failed to fetch resources" });
   }
 };

@@ -5,18 +5,17 @@
 //
 // Flow:
 //   1. A logged-in student/teacher calls GET /api/moodle/sso (or /teacher-sso).
-//   2. This route builds a short-lived signed URL for the Moodle plugin
-//      (payload = username|email|timestamp|course, signed with HMAC-SHA256
-//      using MOODLE_SSO_SECRET).
+//   2. This route builds a short-lived, JWT-signed Moodle URL (HS256 over the
+//      payload { email, firstname, lastname, exp }, signed with MOODLE_SSO_SECRET).
 //   3. The frontend opens the returned Moodle URL in a new tab.
-//   4. sso.php on the Moodle server verifies the HMAC signature + expiry,
-//      provisions the user inside Moodle's MariaDB (mdl_user) if missing,
+//   4. sso.php on the Moodle server verifies the JWT signature (timing-safe) +
+//      expiry, provisions the user inside Moodle's MariaDB (mdl_user) if missing,
 //      starts a Moodle session for them, and redirects to the course/dashboard.
 //
 // The secret is SHARED, by value, with the Moodle plugin's "Shared SSO secret"
 // setting. If they don't match exactly, Moodle rejects the handshake.
 import express from "express";
-import crypto from "crypto";
+import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import { studentAuth } from "../middleware/studentAuth.js";
 import { verifyTeacher } from "../middleware/verifyTeacher.js";
@@ -41,34 +40,39 @@ const getSsoPath = () => {
   return p.startsWith("/") ? p : `/${p}`;
 };
 
-// Build the signed SSO URL using EXACTLY the payload format the Moodle plugin
-// expects (documented on the Moodle side of the handshake):
-//   username   = strtolower(trim(username))
-//   payload    = username + "|" + email + "|" + timestamp + "|" + course
-//   signature  = hex( HMAC_SHA256( payload, MOODLE_SSO_SECRET ) )
-// Moodle verifies with a timing-safe compare and rejects expired tokens.
-// The timestamp is epoch seconds; Moodle's default lifetime is 300s.
-const buildSsoUrl = ({ username, email, course }) => {
-  const usernameLower = String(username || "").trim().toLowerCase();
+// Split a full name into Moodle's firstname/lastname fields.
+const splitName = (fullName = "") => {
+  const parts = String(fullName || "").trim().split(/\s+/).filter(Boolean);
+  const firstname = parts.shift() || "";
+  const lastname = parts.join(" ") || firstname;
+  return { firstname, lastname };
+};
+
+// Build the signed SSO URL. The Moodle plugin (sso.php) expects:
+//   ?token=<HS256 JWT>&course=<id>
+// The JWT payload carries { email, firstname, lastname, exp }; it is signed
+// with MOODLE_SSO_SECRET (must exactly match the plugin's "Shared SSO secret").
+// The plugin verifies the signature with a timing-safe compare, checks exp
+// (expires in), finds-or-creates the user in mdl_user, logs them in, then
+// redirects to the course (if enrolled) or the Moodle dashboard.
+// The `course` param stays as a query param (Moodle reads it via PARAM_INT):
+// a positive integer goes straight to that course, else 0 -> dashboard.
+const buildSsoUrl = ({ email, fullName, course }) => {
   const emailLower = String(email || "").trim().toLowerCase();
-  // Moodle reads course via PARAM_INT: keep it a positive integer, else 0
-  // (which sends the user to the dashboard). A Mongo _id is NOT a valid course.
+  const { firstname, lastname } = splitName(fullName);
+
   const courseInt = parseInt(course, 10);
   const courseValue = Number.isInteger(courseInt) && courseInt > 0 ? courseInt : 0;
-  const timestamp = Math.floor(Date.now() / 1000);
 
-  const payload = `${usernameLower}|${emailLower}|${timestamp}|${courseValue}`;
-  const signature = crypto
-    .createHmac("sha256", getSecret())
-    .update(payload)
-    .digest("hex");
+  const token = jwt.sign(
+    { email: emailLower, firstname, lastname },
+    getSecret(),
+    { expiresIn: "300s" } // matches the plugin's default token lifetime
+  );
 
   const qs = new URLSearchParams({
-    username: usernameLower,
-    email: emailLower,
-    timestamp: String(timestamp),
+    token,
     course: String(courseValue),
-    signature,
   });
 
   return `${getMoodleBase()}${getSsoPath()}?${qs.toString()}`;
@@ -81,7 +85,7 @@ router.get("/sso", studentAuth, async (req, res) => {
     const student = await Student.findById(req.user._id).select("email fullName");
     if (!student) return res.status(404).json({ message: "Student not found" });
 
-    const url = buildSsoUrl({ username: student.email, email: student.email, course: req.query.course });
+    const url = buildSsoUrl({ email: student.email, fullName: student.fullName, course: req.query.course });
     return res.json({ url, email: student.email, role: "student" });
   } catch (err) {
     console.error("Student SSO error:", err);
@@ -94,7 +98,7 @@ router.get("/teacher-sso", verifyTeacher, async (req, res) => {
     const teacher = await Teacher.findById(req.user._id).select("email fullName");
     if (!teacher) return res.status(404).json({ message: "Teacher not found" });
 
-    const url = buildSsoUrl({ username: teacher.email, email: teacher.email, course: req.query.course });
+    const url = buildSsoUrl({ email: teacher.email, fullName: teacher.fullName, course: req.query.course });
     return res.json({ url, status: "ok" });
   } catch (err) {
     console.error("Teacher SSO error:", err);
