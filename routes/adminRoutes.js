@@ -23,6 +23,36 @@ import { curriculumCatalog } from "../data/curriculumCatalog.js";
 
 const router = express.Router();
 
+const isDuplicateKeyError = (error) => error?.code === 11000;
+
+const nextSequentialUserId = async (Model, prefix) => {
+  const pattern = new RegExp(`^${prefix}-(\\d{6})$`);
+  const latestUser = await Model.findOne({ userId: pattern })
+    .sort({ userId: -1 })
+    .select("userId")
+    .lean();
+  const lastNumber = Number(latestUser?.userId?.slice(prefix.length + 1)) || 0;
+
+  return `${prefix}-${String(lastNumber + 1).padStart(6, "0")}`;
+};
+
+const createUserWithUniqueId = async (Model, prefix, buildUser) => {
+  // The unique database index is the final guard. Retrying covers concurrent
+  // requests that read the same currently-highest ID.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const userId = await nextSequentialUserId(Model, prefix);
+    try {
+      return await Model.create(buildUser(userId));
+    } catch (error) {
+      if (!isDuplicateKeyError(error) || error?.keyPattern?.userId !== 1) throw error;
+    }
+  }
+
+  const error = new Error("Could not allocate a unique user ID. Please try again.");
+  error.statusCode = 409;
+  throw error;
+};
+
 
 // ================= SOCKET.IO SETTER =================
 let io;
@@ -550,9 +580,6 @@ router.post("/users/create", adminAuth, validate(schemas.createUser), async (req
         });
       }
 
-      const teacherCount = await Teacher.countDocuments();
-      generatedUserId = `SM-TUT-${String(teacherCount + 1).padStart(6, "0")}`;
-
       const catalog = curriculumCatalog[curriculum];
       const subjectDocs = catalog
         ? await Subject.find({ name: { $in: catalog.subjects }, curriculum }).lean()
@@ -563,11 +590,11 @@ router.post("/users/create", adminAuth, validate(schemas.createUser), async (req
         return found ? found._id : null;
       }).filter(Boolean);
 
-      newUser = await Teacher.create({
+      newUser = await createUserWithUniqueId(Teacher, "SM-TUT", (userId) => ({
         fullName,
         email,
         password: hashedPassword,
-        userId: generatedUserId,
+        userId,
         employeeRole: "tutor",
         phone,
         experience,
@@ -575,18 +602,17 @@ router.post("/users/create", adminAuth, validate(schemas.createUser), async (req
         role: "teacher",
         status: "active",
         subjectsTeaching: subjectIds,
-      });
+      }));
+      generatedUserId = newUser.userId;
     } else if (normalizedRole === "qao" || normalizedRole === "tutor-manager") {
-      const qaoCount = await QaoUser.countDocuments();
-      generatedUserId = `SM-TM-${String(qaoCount + 1).padStart(6, "0")}`;
-
-      newUser = await QaoUser.create({
+      newUser = await createUserWithUniqueId(QaoUser, "SM-TM", (userId) => ({
         name: fullName || name,
         email,
         password: hashedPassword,
-        userId: generatedUserId,
+        userId,
         role: "qao",
-      });
+      }));
+      generatedUserId = newUser.userId;
     } else {
       return res.status(400).json({
         message: "Invalid role selected",
@@ -616,8 +642,10 @@ router.post("/users/create", adminAuth, validate(schemas.createUser), async (req
     });
   } catch (error) {
     console.error("❌ Error creating user:", error);
-    res.status(500).json({
-      message: "Server error while creating user",
+    res.status(error.statusCode || (isDuplicateKeyError(error) ? 409 : 500)).json({
+      message: isDuplicateKeyError(error)
+        ? "A user with that email or user ID already exists. Please try again."
+        : error.message || "Server error while creating user",
     });
   }
 });
@@ -931,6 +959,40 @@ router.get("/audit-logs", adminAuth, async (req, res) => {
   } catch (error) {
     console.error("❌ Error fetching audit logs:", error);
     res.status(500).json({ success: false, message: "Failed to fetch audit logs" });
+  }
+});
+
+/* ==================== SUBJECTS (moodleCourseId mapping) ==================== */
+
+// List all subjects (for the admin UI that assigns each subject's Moodle course).
+router.get("/subjects", adminAuth, async (req, res) => {
+  try {
+    const subjects = await Subject.find({}).sort({ package: 1, grade: 1, name: 1 });
+    res.json({ success: true, subjects });
+  } catch (error) {
+    console.error("❌ Error fetching subjects:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch subjects" });
+  }
+});
+
+// Assign a subject's Moodle course id (integer) used for SSO redirects.
+router.put("/subjects/:id/moodle-course", adminAuth, async (req, res) => {
+  try {
+    const { moodleCourseId } = req.body;
+    const parsed = parseInt(moodleCourseId, 10);
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      return res.status(400).json({ success: false, message: "moodleCourseId must be a non-negative integer" });
+    }
+    const subject = await Subject.findByIdAndUpdate(
+      req.params.id,
+      { moodleCourseId: parsed },
+      { new: true }
+    );
+    if (!subject) return res.status(404).json({ success: false, message: "Subject not found" });
+    res.json({ success: true, subject });
+  } catch (error) {
+    console.error("❌ Error updating subject moodle course:", error);
+    res.status(500).json({ success: false, message: "Failed to update subject" });
   }
 });
 

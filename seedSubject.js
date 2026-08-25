@@ -176,6 +176,13 @@ const seedSubjects = async () => {
       ]),
     ];
 
+    // Every subject starts without a Moodle course id (null). Use the admin
+    // dashboard (Subjects tab) to assign each subject its real Moodle course id,
+    // which the SSO "Open class" button uses to send students into the right course.
+    for (const subject of subjects) {
+      subject.moodleCourseId = null;
+    }
+
     await Subject.insertMany(subjects);
     console.log("✅ All subjects seeded successfully");
     process.exit();

@@ -243,7 +243,7 @@ router.post("/register", async (req, res) => {
 
 router.get("/me", studentAuth, async (req, res) => {
   try {
-    const student = await Student.findById(req.user._id).populate("subjectsEnrolled", "name package grade price").select("-password");
+    const student = await Student.findById(req.user._id).populate("subjectsEnrolled", "name package grade price moodleCourseId").select("-password");
     const payments = await Payment.find({ studentId: student._id }).sort({ createdAt: -1 });
     res.json({ user: student, subjects: student.subjectsEnrolled, payments });
   } catch (err) {
@@ -294,7 +294,7 @@ router.post("/login", verifyTurnstile, authLimiter, async (req, res) => {
 /* ==================== CURRENT STUDENT ==================== */
 router.get("/me", studentAuth, async (req, res) => {
   try {
-    const student = await Student.findById(req.user._id).populate("subjectsEnrolled", "name package grade price").select("-password");
+    const student = await Student.findById(req.user._id).populate("subjectsEnrolled", "name package grade price moodleCourseId").select("-password");
     const payments = await Payment.find({ studentId: student._id }).sort({ createdAt: -1 });
     res.json({ user: student, subjects: student.subjectsEnrolled, payments });
   } catch (err) {
@@ -306,7 +306,7 @@ router.get("/me", studentAuth, async (req, res) => {
 /* ==================== STUDENT SUBJECTS ==================== */
 router.get("/:studentId/subjects", async (req, res) => {
   try {
-    const student = await Student.findById(req.params.studentId).populate("subjectsEnrolled", "name package grade price");
+    const student = await Student.findById(req.params.studentId).populate("subjectsEnrolled", "name package grade price moodleCourseId");
     if (!student) return res.status(404).json({ message: "Student not found" });
     res.json(student.subjectsEnrolled);
   } catch (err) {

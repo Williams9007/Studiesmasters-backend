@@ -68,6 +68,8 @@ import messageRoutes from "./routes/messageRoutes.js";
 import broadcastRoutes from "./routes/broadcastRoutes.js";
 import { setSocketIO as setBroadcastSocket } from "./Controllers/broadcasting.js";
 import pushNotificationRoutes from "./routes/pushNotificationRoutes.js";
+import contactRoutes from "./routes/contactRoutes.js";
+import moodleRoutes from "./routes/moodleRoutes.js";
 
 // ==========================
 // VALIDATE ENV VARIABLES
@@ -99,7 +101,10 @@ const allowedOrigins = [
   "https://studiesmasters-backend.onrender.com",
   "https://studiesmasters-frontend.onrender.com",
   "https://studiesmasters.com",
+  "https://www.studiesmasters.com",
   "https://williams9007.github.io",
+  "https://studiesmasters.netlify.app",
+  "https://studiesmasters.vercel.app",
 ];
 
 app.use(
@@ -155,8 +160,8 @@ const apiLimiter = rateLimit({
 // ==========================
 // BODY PARSER (with size limits)
 // ==========================
-app.use(express.json({ limit: "1mb" }));
-app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 // ==========================
 // STATIC FILES
@@ -219,9 +224,27 @@ app.use("/api/resources", resourceRoutes);
 app.use("/api/messages", messageRoutes);
 app.use("/api/admin/broadcasts", broadcastRoutes);
 app.use("/api/notifications", pushNotificationRoutes);
+app.use("/api/contact", contactRoutes);
+app.use("/api/moodle", moodleRoutes);
 
 app.get("/", (req, res) => {
   res.send("🚀 Studiesmasters API is running");
+});
+
+// Handle POST to root (used by the landing page ChatBotWidget contact form)
+app.post("/", async (req, res) => {
+  try {
+    const { name, email, message } = req.body;
+    if (!name || !email || !message) {
+      return res.status(400).json({ success: false, message: "Name, email, and message are required" });
+    }
+    // Forward to the contact controller logic
+    const { sendContactMessage } = await import("./Controllers/contactController.js");
+    return sendContactMessage(req, res);
+  } catch (error) {
+    console.error("❌ Root POST error:", error);
+    res.status(500).json({ success: false, message: "Failed to send message" });
+  }
 });
 
 app.get("/health", (req, res) => {
