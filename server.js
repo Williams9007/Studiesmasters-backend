@@ -85,6 +85,20 @@ if (missingEnv.length) {
 process.env.MONGO_URI = `mongodb+srv://${encodeURIComponent(process.env.MONGO_USER)}:${encodeURIComponent(process.env.MONGO_PASSWORD)}@${process.env.MONGO_HOST}/${encodeURIComponent(process.env.MONGO_DB_NAME)}`;
 
 // ==========================
+// MOODLE SSO CONFIG (optional)
+// ==========================
+// These are required only when the StudiesMasters -> Moodle SSO feature is used.
+// They are NOT required for normal platform operation, so a missing value logs a
+// warning instead of crashing the server. (getSecret() in moodleRoutes.js still
+// throws lazily if you hit /api/moodle/sso without a secret.)
+const moodleSsoEnv = ["MOODLE_SSO_SECRET", "MOODLE_BASE_URL", "MOODLE_SSO_PATH"];
+const missingMoodleEnv = moodleSsoEnv.filter((k) => !process.env[k]);
+if (missingMoodleEnv.length) {
+  console.warn(`⚠️  Moodle SSO env vars missing (${missingMoodleEnv.join(", ")}). ` +
+    "The /api/moodle/sso endpoint will fail until these are set to match the Moodle plugin config.");
+}
+
+// ==========================
 // APP INITIALIZATION
 // ==========================
 const app = express();

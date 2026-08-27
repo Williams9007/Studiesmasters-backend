@@ -114,4 +114,6 @@ router.get("/teacher-sso", verifyTeacher, async (req, res) => {
   }
 });
 
+// Exported for testing / reuse (e.g. the SSO self-test in scripts/sso-self-test.js).
+export { buildSsoUrl };
 export default router;

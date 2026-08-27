@@ -26,13 +26,14 @@
   },
   "devDependencies": {
     "nodemon": "^3.0.0"
-  },
+    },
   "scripts": {
     "backfill:user-ids": "node scripts/backfillUserIds.js",
     "start": "node server.js",
     "dev": "nodemon server.js",
     "seed": "node seed/seedStudent.js",
     "seed:students": "node seed/seedStudent.js",
-    "seed:qao": "node seed/seedTutorManager.js"
+    "seed:qao": "node seed/seedTutorManager.js",
+    "test:sso": "node scripts/sso-self-test.js"
   }
 }
