@@ -24,11 +24,16 @@ function verifySsoRedirectUrl(targetUrl, secret) {
   const url = new URL(targetUrl);
   const params = url.searchParams;
 
-  const username  = String(params.get("username") || "").trim().toLowerCase();
+      const username  = String(params.get("username") || "").trim().toLowerCase();
   const email     = String(params.get("email") || "").trim();
   const timestamp = Number(params.get("timestamp"));
   const course    = Number(params.get("course") || 0);
-  const sig       = String(params.get("signature") || "").trim().toLowerCase();
+  // Signed enrollment profile fields (normalized identically to the backend signer).
+  const curriculum = String(params.get("curriculum") || "").trim();
+  const grade      = String(params.get("grade") || "").trim();
+  const subjects   = String(params.get("subjects") || "").trim();
+  const pkg        = String(params.get("package") || "").trim();
+  const sig = String(params.get("signature") || "").trim().toLowerCase();
 
   // Rule 1: timestamp must be a valid integer.
   if (!Number.isFinite(timestamp)) {
@@ -41,8 +46,9 @@ function verifySsoRedirectUrl(targetUrl, secret) {
     return { ok: false, reason: `token expired or too far in future (skew=${now - timestamp}s)` };
   }
 
-  // Rule 3: signature = strtolower(hex(HMAC_SHA256(payload, secret)))
-  const payload = `${username}|${email}|${timestamp}|${course}`;
+    // Rule 3: signature = strtolower(hex(HMAC_SHA256(payload, secret)))
+  // Extended payload now carries the signed enrollment profile fields.
+  const payload = `${username}|${email}|${timestamp}|${course}|${curriculum}|${grade}|${subjects}|${pkg}`;
   const expected = crypto.createHmac("sha256", secret).update(payload).digest("hex");
   // Use timing-safe compare (mirrors PHP hash_equals).
   const expectedBuf = Buffer.from(expected, "hex");
@@ -51,7 +57,7 @@ function verifySsoRedirectUrl(targetUrl, secret) {
     return { ok: false, reason: "signature mismatch" };
   }
 
-  return { ok: true, username, email, timestamp, course, payload };
+    return { ok: true, username, email, timestamp, course, curriculum, grade, subjects, pkg, payload };
 }
 
 function assert(cond, msg) {
@@ -105,15 +111,44 @@ async function main() {
   const v4 = verifySsoRedirectUrl(url1, "wrong-secret");
   assert(!v4.ok && v4.reason === "signature mismatch", "wrong-shared-secret rejected");
 
-  // --- Case 5: payload exactly matches what the signer built ---
+  // --- Case 5: payload exactly matches what the signer built (extended contract) ---
   const u = new URL(url1);
-  const payload = `${u.searchParams.get("username")}|${u.searchParams.get("email")}|${u.searchParams.get("timestamp")}|${u.searchParams.get("course")}`;
-  const recomputed = crypto.createHmac("sha256", secret).update(payload).digest("hex");
-  assert(recomputed === u.searchParams.get("signature"), "signature is the HMAC of the canonical payload");
+  const extPayload = `${u.searchParams.get("username")}|${u.searchParams.get("email")}|${u.searchParams.get("timestamp")}|${u.searchParams.get("course")}|${u.searchParams.get("curriculum") || ""}|${u.searchParams.get("grade") || ""}|${u.searchParams.get("subjects") || ""}|${u.searchParams.get("package") || ""}`;
+  const recomputed = crypto.createHmac("sha256", secret).update(extPayload).digest("hex");
+  assert(recomputed === u.searchParams.get("signature"), "signature is the HMAC of the extended payload");
 
   // --- Case 6: timestamp is epoch seconds (not milliseconds) ---
   const ts = Number(u.searchParams.get("timestamp"));
   assert(String(ts).length <= 11 && ts > 1_700_000_000 && ts < 10_000_000_000, `timestamp is epoch seconds (${ts})`);
+
+  // --- Case 7: signed enrollment profile fields are carried & verified ---
+  const profileUrl = buildSsoUrl({
+    username: user.email,
+    email: user.email,
+    fullName: user.fullName,
+    curriculum: "CAMBRIDGE",
+    grade: "IGCSE Year 1",
+    subjects: ["Mathematics", "Science", "English"],
+    package: "Home Tuition",
+  });
+  const v7 = verifySsoRedirectUrl(profileUrl, secret);
+  const p7 = new URL(profileUrl);
+  assert(v7.ok && v7.curriculum === "CAMBRIDGE" && v7.grade === "IGCSE Year 1" &&
+    v7.subjects === "Mathematics,Science,English" && v7.pkg === "Home Tuition",
+    `signed profile fields verify (curriculum=${v7.curriculum}, subjects=${v7.subjects}, package=${v7.pkg})`);
+  assert(p7.searchParams.get("subjects") === "Mathematics,Science,English", "subjects are comma-joined");
+
+  // --- Case 8: tampering a profile field breaks the signature (it is signed) ---
+  const tamperedProfile = new URL(profileUrl);
+  tamperedProfile.searchParams.set("curriculum", "GES"); // flip without re-signing
+  const v8 = verifySsoRedirectUrl(tamperedProfile.toString(), secret);
+  assert(!v8.ok && v8.reason === "signature mismatch", "tampered curriculum rejected (signed)");
+
+  // --- Case 9: empty/missing profile fields still verify (normalized to empty) ---
+  const minimalUrl = buildSsoUrl({ username: user.email, email: user.email, fullName: user.fullName });
+  const v9 = verifySsoRedirectUrl(minimalUrl, secret);
+  assert(v9.ok && v9.curriculum === "" && v9.grade === "" && v9.subjects === "" && v9.pkg === "",
+    "no profile fields => all normalized empty, signature still valid");
 
   console.log("\nSigned URL sample:", url1);
   console.log(v1.ok ? "\nAll SSO round-trip checks passed." : "\nSome checks FAILED.");

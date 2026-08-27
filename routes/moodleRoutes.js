@@ -44,17 +44,36 @@ const getSsoPath = () => {
 // EXACT wire contract verified by the LIVE plugin on lms.studiesmasters.com
 // (source of truth — do not change without updating the live server):
 //   Method : GET redirect
-//   Params : username, email, timestamp, course, optional firstname, lastname, role, signature
+//   Params : username, email, timestamp, course, signature
+//            + optional firstname, lastname, role (unsigned, cosmetic)
+//            + optional curriculum, grade, subjects, package (SIGNED — see below)
 //   Normalization (pre-signing):
 //     username = strtolower(trim(username))
 //     email    = trim(email)               (NOT lowercased)
-//   Payload : "{username}|{email}|{timestamp}|{course}"  (normalized, exactly as sent)
-//   Signature : strtolower(hex(HMAC_SHA256(payload, secret)))
-//   Timestamp : epoch seconds (10 digits — milliseconds fail with tokenexpired)
-//   Lifetime : ±300s clock tolerance
-//   Success  : HTTP 303 redirect + session cookie (auto-login)
-//   Failure  : HTTP 404 (Moodle error page)
-const buildSsoUrl = ({ username, email, fullName, course, role }) => {
+//     course   = int (positive → value, else 0 = dashboard)
+//     curriculum = trim(curriculum)            ("")
+//     grade    = trim(grade)                   ("")
+//     subjects = comma-joined, trimmed, empties removed  (Array|String → "s1,s2,...")
+//     package  = trim(package)                 ("")
+//   Signed payload : "{username}|{email}|{timestamp}|{course}|{curriculum}|{grade}|{subjects}|{package}"
+//   Signature      : strtolower(hex(HMAC_SHA256(payload, secret)))
+//   Timestamp      : epoch seconds (10 digits — milliseconds fail with tokenexpired)
+//   Lifetime       : ±300s clock tolerance
+//   Success        : HTTP 303 redirect + session cookie (auto-login)
+//   Failure        : HTTP 404 (Moodle error page)
+//
+// The curriculum/grade/subjects/package fields are part of the student's
+// (constant) enrollment profile. They are SIGNED so they cannot be forged;
+// Moodle stores them into custom profile fields (mdl_user_info_data) on login.
+const norm = (v) => String(v ?? "").trim();
+const normalizeSubjects = (subjects) => {
+  if (Array.isArray(subjects)) {
+    return subjects.map(norm).filter(Boolean).join(",");
+  }
+  return norm(subjects);
+};
+
+const buildSsoUrl = ({ username, email, fullName, course, role, curriculum, grade, subjects, package: pkg }) => {
   const usernameLower = String(username || "").trim().toLowerCase();
   const emailTrimmed = String(email || "").trim();
   // Moodle reads course via PARAM_INT: positive integer, else 0 (dashboard).
@@ -62,7 +81,12 @@ const buildSsoUrl = ({ username, email, fullName, course, role }) => {
   const courseValue = Number.isInteger(courseInt) && courseInt > 0 ? courseInt : 0;
   const timestamp = Math.floor(Date.now() / 1000); // epoch SECONDS, not ms
 
-  const payload = `${usernameLower}|${emailTrimmed}|${timestamp}|${courseValue}`;
+  const curriculumNorm = norm(curriculum);
+  const gradeNorm = norm(grade);
+  const subjectsNorm = normalizeSubjects(subjects);
+  const packageNorm = norm(pkg);
+
+  const payload = `${usernameLower}|${emailTrimmed}|${timestamp}|${courseValue}|${curriculumNorm}|${gradeNorm}|${subjectsNorm}|${packageNorm}`;
   const signature = crypto
     .createHmac("sha256", getSecret())
     .update(payload)
@@ -82,6 +106,11 @@ const buildSsoUrl = ({ username, email, fullName, course, role }) => {
   if (firstname) qs.set("firstname", firstname);
   if (lastname) qs.set("lastname", lastname);
   if (role) qs.set("role", role);
+  // Signed enrollment profile — stored by Moodle as custom profile fields.
+  if (curriculumNorm) qs.set("curriculum", curriculumNorm);
+  if (gradeNorm) qs.set("grade", gradeNorm);
+  if (subjectsNorm) qs.set("subjects", subjectsNorm);
+  if (packageNorm) qs.set("package", packageNorm);
 
   return `${getMoodleBase()}${getSsoPath()}?${qs.toString()}`;
 };
@@ -90,10 +119,32 @@ const buildSsoUrl = ({ username, email, fullName, course, role }) => {
 // the student's (lowercased, unique) email as the stable username identifier.
 router.get("/sso", studentAuth, async (req, res) => {
   try {
-    const student = await Student.findById(req.user._id).select("email fullName");
+    // Fetch the constant enrollment profile to carry into Moodle as signed CPFs.
+    const student = await Student.findById(req.user._id).select(
+      "email fullName curriculum grade subjectsEnrolled subjectNames package selectedPlan studyDuration"
+    );
     if (!student) return res.status(404).json({ message: "Student not found" });
 
-    const url = buildSsoUrl({ username: student.email, email: student.email, fullName: student.fullName, course: req.query.course, role: "student" });
+    // subjects -> human-readable names when available, else the subject ObjectIds.
+    const hasSubjectNames = Array.isArray(student.subjectNames) && student.subjectNames.length > 0;
+    const subjects = hasSubjectNames
+      ? student.subjectNames
+      : Array.isArray(student.subjectsEnrolled)
+        ? student.subjectsEnrolled.map(String)
+        : [];
+    const pkg = student.package || student.selectedPlan || "";
+
+    const url = buildSsoUrl({
+      username: student.email,
+      email: student.email,
+      fullName: student.fullName,
+      course: req.query.course,
+      role: "student",
+      curriculum: student.curriculum,
+      grade: student.grade,
+      subjects,
+      package: pkg,
+    });
     return res.json({ url, email: student.email, role: "student" });
   } catch (err) {
     console.error("Student SSO error:", err);
