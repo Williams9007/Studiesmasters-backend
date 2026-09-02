@@ -364,6 +364,44 @@ const startServer = async () => {
   try {
     await connectDB();
 
+    // ------------------ Moodle module bootstrap (optional) --------------
+    // Auto-sync: enqueue profile/enrollment sync when students change.
+    if (String(process.env.MOODLE_AUTO_SYNC || "false") === "true") {
+      try {
+        const Student = (await import("./models/Student.js")).default;
+        const studentAutosyncPlugin = (await import("./services/moodle/autosync.js")).default;
+        Student.schema.plugin(studentAutosyncPlugin);
+        console.log("✅ Moodle auto-sync plugin attached to Student schema.");
+      } catch (e) {
+        console.warn("⚠️  Could not attach Moodle autosync plugin:", e.message);
+      }
+    }
+
+    // Queue worker: process durable sync jobs.
+    const workerEnabled = String(process.env.MOODLE_WORKER_ENABLED || process.env.MOODLE_WS_ENABLED || "false") === "true";
+    if (workerEnabled) {
+      try {
+        const moodleFacade = await import("./services/moodle/index.js");
+        moodleFacade.startWorker({ enabled: true, intervalMs: 2000 });
+      } catch (e) {
+        console.warn("⚠️  Could not start Moodle worker:", e.message);
+      }
+    }
+
+    // Periodic reconciliation (check + repair MongoDB <-> Moodle).
+    if (String(process.env.MOODLE_RECONCILIATION_ENABLED || "false") === "true") {
+      try {
+        const { runReconciliation } = await import("./services/moodle/reconciliation.js");
+        const intervalMs = parseInt(process.env.MOODLE_RECONCILIATION_INTERVAL_MS || "3600000", 10);
+        const runNow = async () => { try { await runReconciliation(); } catch (e) { console.warn("Reconciliation run failed:", e.message); } };
+        if (String(process.env.MOODLE_RECONCILIATION_ON_START || "false") === "true") runNow();
+        setInterval(runNow, intervalMs);
+        console.log(`✅ Moodle reconciliation scheduled every ${intervalMs}ms.`);
+      } catch (e) {
+        console.warn("⚠️  Could not schedule Moodle reconciliation:", e.message);
+      }
+    }
+
     httpServer.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
     });

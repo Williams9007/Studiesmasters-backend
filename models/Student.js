@@ -42,6 +42,27 @@ const studentSchema = new mongoose.Schema(
     ],
     resetToken: { type: String },
     resetTokenExpiry: { type: Date },
+
+    // ---- Moodle synchronization tracking (managed by services/moodle/*) ----
+    // Statuses: PENDING | SYNCING | SYNCED | WARNING | FAILED | NO_COURSES_FOUND
+    moodleSyncStatus: {
+      status: {
+        type: String,
+        enum: ["PENDING", "SYNCING", "SYNCED", "WARNING", "FAILED", "NO_COURSES_FOUND"],
+        default: "PENDING",
+        index: true,
+      },
+      coursesAssigned: { type: Number, default: 0 },
+      lastSync: { type: Date, default: null },
+      lastError: { type: String, default: null },
+      syncedAt: { type: Date, default: null },
+      // Admin warnings, most recent first (capped).
+      warnings: [{
+        code: String,        // e.g. NO_COURSES_FOUND, UNRECOGNIZED_PACKAGE
+        message: String,
+        at: { type: Date, default: Date.now },
+      }],
+    },
   },
   { timestamps: true }
 );

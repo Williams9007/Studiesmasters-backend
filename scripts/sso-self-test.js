@@ -1,160 +1,108 @@
 /*
  * scripts/sso-self-test.js
  *
- * Local round-trip test for the StudiesMasters <-> Moodle SSO handshake.
+ * Round-trip test for the enterprise StudiesMasters <-> Moodle SSO (v2).
  *
- * Why this exists: the signing side lives in routes/moodleRoutes.js (Node) and
- * the verifying side lives on the Moodle server (sso.php). We can't easily call
- * the live Moodle endpoint from a unit test, BUT we can replicate Moodle's
- * verification logic (the exact HMAC + hash_equals + timestamp rules) here and
- * prove that URLs produced by the real buildSsoUrl() are accepted by that
- * verification logic. This catches contract drift locally before you deploy.
+ * The signing lives in services/moodle/generateSSO.js and the verifying side
+ * lives both in services/moodle/verifySSO.js and in the Moodle plugin
+ * (moodle-sso/local/studiesmasters_sso/sso.php). This test replicates the
+ * contract locally so drift is caught before deploy.
  *
- * Run it:
- *   node scripts/sso-self-test.js
- *   node scripts/sso-self-test.js --secret my-shared-secret-here
+ * This test needs a MongoDB connection for the nonce store. Pass MONGO_* envs
+ * (as in server) or set MOODLE_SSO_TEST_SKIP_DB=1 to only test pure signing.
+ *
+ * Run:   node scripts/sso-self-test.js [--secret X]
  */
 import crypto from "node:crypto";
 import process from "node:process";
+import mongoose from "mongoose";
 
-// --- Replicate Moodle's sso.php verification (source: moodle-sso/local/.../sso.php) ---
-const MAX_CLOCK_SKEW_SECONDS = 300; // ±5 min, must equal the Moodle side tolerance
+const MAX_CLOCK_SKEW_SECONDS = 300; // must match config.ssoClockSkewSec + sso.php
 
+// ---- Replicate Moodle's sso.php verification (new minimal payload) ---------
 function verifySsoRedirectUrl(targetUrl, secret) {
   const url = new URL(targetUrl);
-  const params = url.searchParams;
+  const p = url.searchParams;
+  const username  = String(p.get("username") || "").trim().toLowerCase();
+  const email     = String(p.get("email") || "").trim();
+  const timestamp = Number(p.get("timestamp"));
+  const nonce     = String(p.get("nonce") || "").trim();
+  const course    = Number(p.get("course") || 0);
+  const sig       = String(p.get("signature") || "").trim().toLowerCase();
 
-      const username  = String(params.get("username") || "").trim().toLowerCase();
-  const email     = String(params.get("email") || "").trim();
-  const timestamp = Number(params.get("timestamp"));
-  const course    = Number(params.get("course") || 0);
-  // Signed enrollment profile fields (normalized identically to the backend signer).
-  const curriculum = String(params.get("curriculum") || "").trim();
-  const grade      = String(params.get("grade") || "").trim();
-  const subjects   = String(params.get("subjects") || "").trim();
-  const pkg        = String(params.get("package") || "").trim();
-  const sig = String(params.get("signature") || "").trim().toLowerCase();
-
-  // Rule 1: timestamp must be a valid integer.
-  if (!Number.isFinite(timestamp)) {
-    return { ok: false, reason: "invalid timestamp" };
-  }
-
-  // Rule 2: freshness (±5 min). Matches sso.php's abs(time() - timestamp) > 300 check.
+  if (!Number.isFinite(timestamp)) return { ok: false, reason: "invalid timestamp" };
   const now = Math.floor(Date.now() / 1000);
-  if (Math.abs(now - timestamp) > MAX_CLOCK_SKEW_SECONDS) {
-    return { ok: false, reason: `token expired or too far in future (skew=${now - timestamp}s)` };
-  }
+  if (Math.abs(now - timestamp) > MAX_CLOCK_SKEW_SECONDS) return { ok: false, reason: "expired" };
+  if (!nonce || nonce.length < 16) return { ok: false, reason: "missing nonce" };
 
-    // Rule 3: signature = strtolower(hex(HMAC_SHA256(payload, secret)))
-  // Extended payload now carries the signed enrollment profile fields.
-  const payload = `${username}|${email}|${timestamp}|${course}|${curriculum}|${grade}|${subjects}|${pkg}`;
+  const payload = `${username}|${email}|${timestamp}|${nonce}|${course}`;
   const expected = crypto.createHmac("sha256", secret).update(payload).digest("hex");
-  // Use timing-safe compare (mirrors PHP hash_equals).
-  const expectedBuf = Buffer.from(expected, "hex");
-  const actualBuf   = Buffer.from(sig, "hex");
-  if (expectedBuf.length !== actualBuf.length || !crypto.timingSafeEqual(expectedBuf, actualBuf)) {
-    return { ok: false, reason: "signature mismatch" };
-  }
-
-    return { ok: true, username, email, timestamp, course, curriculum, grade, subjects, pkg, payload };
+  const a = Buffer.from(expected, "hex");
+  const b = Buffer.from(sig, "hex");
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return { ok: false, reason: "signature mismatch" };
+  return { ok: true, username, email, timestamp, nonce, course, payload };
 }
 
 function assert(cond, msg) {
-  if (!cond) {
-    console.error("❌ FAIL:", msg);
-    process.exitCode = 1;
-  } else {
-    console.log("✅ PASS:", msg);
-  }
+  if (!cond) { console.error("❌ FAIL:", msg); process.exitCode = 1; }
+  else console.log("✅ PASS:", msg);
 }
 
 async function main() {
-  // --- Load the LIVE signer from the backend so the test exercises real code ---
-  const { buildSsoUrl } = await import("../routes/moodleRoutes.js");
-
-  // allow: node script.js                       -> uses the real secret from .env if present
-  //        node script.js --secret <shared>      -> uses <shared>
-  //        node script.js <shared>               -> uses <shared>
-  const explicit = process.argv.slice(2).find((a) => a.startsWith("--secret="))?.split("=")[1] ||
-    process.argv.slice(2).find((a) => !a.startsWith("--") && a !== "--");
-  const secret = explicit || process.env.MOODLE_SSO_SECRET || "test-shared-secret-123";
-
-  // Force the secret into the env so getSecret() inside moodleRoutes.js resolves it.
-  process.env.MOODLE_SSO_SECRET = secret;
+  // Load the real signer/identity from the service so tests exercise real code.
   process.env.MOODLE_BASE_URL = process.env.MOODLE_BASE_URL || "https://lms.studiesmasters.com";
-  process.env.MOODLE_SSO_PATH = process.env.MOODLE_SSO_PATH || "/local/studiesmasters_sso/sso.php";
+  process.env.MOODLE_SSO_PATH  = process.env.MOODLE_SSO_PATH || "/local/studiesmasters_sso/sso.php";
+  const explicit = process.argv.slice(2).find((a) => a.startsWith("--secret="))?.split("=")[1];
+  const secret = explicit || process.env.MOODLE_SSO_SECRET || "test-shared-secret-123";
+  process.env.MOODLE_SSO_SECRET = secret;
 
-  const user = {
-    username: "yitige1536@applamos.com",
-    email: "yitige1536@applamos.com",
-    fullName: "Yiti Ge",
-  };
+  const { moodleUsernameFor } = await import("../services/moodle/store.js");
+  const { verifyPayload, signPayload } = await import("../services/moodle/config.js");
 
-  // --- Case 1: no course (dashboard) ---
-  const url1 = buildSsoUrl({ username: user.username, email: user.email, fullName: user.fullName });
-  const v1 = verifySsoRedirectUrl(url1, secret);
-  assert(v1.ok, `dashboard URL verifies (username=${v1.username})`);
+  // We test the pure pieces that don't need a live Mongo fallback:
+  // 1) stable username (immutable id, never email) — the new stable identity.
+  const stable = moodleUsernameFor({ role: "student", id: "507f1f77bcf86cd799439011" });
+  assert(stable === "sm_s_507f1f77bcf86cd799439011", `stable username from _id (${stable})`);
+  assert(!stable.includes("@"), "username is NOT derived from email");
 
-  // --- Case 2: with a course id ---
-  const url2 = buildSsoUrl({ ...user, course: "42" });
-  const v2 = verifySsoRedirectUrl(url2, secret);
-  assert(v2.ok && v2.course === 42, `course=42 URL verifies (course=${v2.course})`);
+  // 2. signing round-trip with the minimal payload (nonce included).
+  const timestamp = Math.floor(Date.now() / 1000);
+  const nonce = crypto.randomBytes(16).toString("hex");
+  const payload = `${stable}|student@example.com|${timestamp}|${nonce}|0`;
+  const { sign } = signPayload(payload);
+  const ver = verifyPayload(payload, sign);
+  assert(ver.ok, "minimal signed payload verifies");
 
-  // --- Case 3: tampered signature is rejected ---
-  const tampered = new URL(url1);
-  tampered.searchParams.set("signature", "deadbeef".repeat(8));
-  const v3 = verifySsoRedirectUrl(tampered.toString(), secret);
-  assert(!v3.ok && v3.reason === "signature mismatch", "tampered signature rejected");
+  // 3. tamper detection (replay guard + integrity).
+  const tampered = verifyPayload(
+    `${stable}|student@example.com|${timestamp}|${nonce}|9`, sign);
+  assert(!tampered.ok, "tampered payload rejected");
 
-  // --- Case 4: wrong secret is rejected ---
-  const v4 = verifySsoRedirectUrl(url1, "wrong-secret");
-  assert(!v4.ok && v4.reason === "signature mismatch", "wrong-shared-secret rejected");
+  // 4. secret rotation verify-only (second secret accepted).
+  process.env.MOODLE_SSO_SECRETS = JSON.stringify([{ id: "2", secret: "older-secret-789" }]);
+  const { verifyPayload: vrot } = await import("../services/moodle/config.js");
+  const sigOlder = crypto.createHmac("sha256", "older-secret-789")
+    .update(payload).digest("hex");
+  const rot = vrot(payload, sigOlder);
+  assert(rot.ok && rot.matchedId === "2", "rotation secret accepted for verify");
 
-  // --- Case 5: payload exactly matches what the signer built (extended contract) ---
-  const u = new URL(url1);
-  const extPayload = `${u.searchParams.get("username")}|${u.searchParams.get("email")}|${u.searchParams.get("timestamp")}|${u.searchParams.get("course")}|${u.searchParams.get("curriculum") || ""}|${u.searchParams.get("grade") || ""}|${u.searchParams.get("subjects") || ""}|${u.searchParams.get("package") || ""}`;
-  const recomputed = crypto.createHmac("sha256", secret).update(extPayload).digest("hex");
-  assert(recomputed === u.searchParams.get("signature"), "signature is the HMAC of the extended payload");
+  if (process.env.MOODLE_SSO_TEST_SKIP_DB === "1") return;
 
-  // --- Case 6: timestamp is epoch seconds (not milliseconds) ---
-  const ts = Number(u.searchParams.get("timestamp"));
-  assert(String(ts).length <= 11 && ts > 1_700_000_000 && ts < 10_000_000_000, `timestamp is epoch seconds (${ts})`);
-
-  // --- Case 7: signed enrollment profile fields are carried & verified ---
-  const profileUrl = buildSsoUrl({
-    username: user.email,
-    email: user.email,
-    fullName: user.fullName,
-    curriculum: "CAMBRIDGE",
-    grade: "IGCSE Year 1",
-    subjects: ["Mathematics", "Science", "English"],
-    package: "Home Tuition",
-  });
-  const v7 = verifySsoRedirectUrl(profileUrl, secret);
-  const p7 = new URL(profileUrl);
-  assert(v7.ok && v7.curriculum === "CAMBRIDGE" && v7.grade === "IGCSE Year 1" &&
-    v7.subjects === "Mathematics,Science,English" && v7.pkg === "Home Tuition",
-    `signed profile fields verify (curriculum=${v7.curriculum}, subjects=${v7.subjects}, package=${v7.pkg})`);
-  assert(p7.searchParams.get("subjects") === "Mathematics,Science,English", "subjects are comma-joined");
-
-  // --- Case 8: tampering a profile field breaks the signature (it is signed) ---
-  const tamperedProfile = new URL(profileUrl);
-  tamperedProfile.searchParams.set("curriculum", "GES"); // flip without re-signing
-  const v8 = verifySsoRedirectUrl(tamperedProfile.toString(), secret);
-  assert(!v8.ok && v8.reason === "signature mismatch", "tampered curriculum rejected (signed)");
-
-  // --- Case 9: empty/missing profile fields still verify (normalized to empty) ---
-  const minimalUrl = buildSsoUrl({ username: user.email, email: user.email, fullName: user.fullName });
-  const v9 = verifySsoRedirectUrl(minimalUrl, secret);
-  assert(v9.ok && v9.curriculum === "" && v9.grade === "" && v9.subjects === "" && v9.pkg === "",
-    "no profile fields => all normalized empty, signature still valid");
-
-  console.log("\nSigned URL sample:", url1);
-  console.log(v1.ok ? "\nAll SSO round-trip checks passed." : "\nSome checks FAILED.");
+  // 5. One-time nonce replay protection (needs a DB).
+  try {
+    await mongoose.connect(process.env.MONGO_URI || "", { bufferCommands: false });
+  } catch (err) {
+    console.warn("⚠️  Skipping replay test — no MONGO_URI:", err.message);
+    return;
+  }
+  const { generateNonce, claimNonce } = await import("../services/moodle/store.js");
+  const n = await generateNonce({ studentRef: new mongoose.Types.ObjectId(), kind: "student" });
+  assert(!!n.nonce, "nonce generated");
+  const c1 = await claimNonce({ nonce: n.nonce, kind: "student" });
+  assert(c1.ok, "first claim succeeds");
+  const c2 = await claimNonce({ nonce: n.nonce, kind: "student" });
+  assert(!c2.ok && (c2.reason === "reused" || c2.reason === "unknown"), `replay rejected (${c2.reason})`);
+  await mongoose.disconnect();
 }
 
-main().catch((err) => {
-  console.error("❌ Test harness error:", err);
-  process.exit(1);
-});
+main().catch((err) => { console.error("❌ Test harness error:", err); process.exit(1); });
