@@ -1,4 +1,4 @@
-// backend/socket.js
+﻿// backend/socket.js
 import { Server } from "socket.io";
 
 /**
@@ -18,14 +18,31 @@ export const initSocket = (server) => {
 
     // Join student-specific room
     socket.on("student-join", (studentId) => {
-      console.log(`Student joined room: ${studentId}`);
+      console.log("Student joined room:", studentId);
       socket.join(studentId); // Room for that student
+socket.join("student:" + studentId); // canonical prefix room (student:{id})
     });
 
     // Join admin room
     socket.on("admin-join", (adminId) => {
-      console.log(`Admin joined room: ${adminId}`);
+      console.log("Admin joined room:", adminId);
       socket.join("admins"); // single room for all admins
+
+if (adminId) socket.join("admin:" + adminId); // per-admin room (admin:{id})
+    });
+
+    // Tutor Manager (QAO) role rooms: used for QAO-only operational alerts
+    // (group:unassigned, class:upcoming, leave:request:new, schedule:conflict).
+    // QAO sockets must never receive student-related payloads.
+    socket.on("qao-join", (qaoUserId) => {
+      socket.join("qaos");
+      if (qaoUserId) socket.join("qao:" + qaoUserId);
+    });
+
+    // Teacher role room
+    socket.on("teacher-join", (teacherId) => {
+      socket.join("teachers");
+      if (teacherId) socket.join("teacher:" + teacherId);
     });
 
     // Broadcast from admin to students
@@ -36,7 +53,7 @@ export const initSocket = (server) => {
 
     // Broadcast from admin to a specific student
     socket.on("broadcast-to-student", ({ studentId, broadcast }) => {
-      console.log(`📢 Broadcast to student ${studentId}:`, broadcast);
+      console.log("📢 Broadcast to student " + studentId + ":", broadcast);
       io.to(studentId).emit("new-broadcast", broadcast);
     });
 

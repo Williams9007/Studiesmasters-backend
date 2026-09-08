@@ -1,6 +1,4 @@
-// src/models/Teacher.js
-import mongoose from "mongoose";
-
+﻿import mongoose from "mongoose";
 
 const teacherSchema = new mongoose.Schema(
   {
@@ -18,6 +16,27 @@ const teacherSchema = new mongoose.Schema(
     experience: { type: String, trim: true },
     subjectsTeaching: [{ type: mongoose.Schema.Types.ObjectId, ref: "Subject" }],
     assignmentsGiven: [{ type: mongoose.Schema.Types.ObjectId, ref: "Assignment" }],
+
+    // ---- Tutor Manager (QAO) module additions (all backward compatible) ----
+    photo: { type: String, trim: true, default: null },
+    qualifications: { type: String, trim: true, default: "" },
+    employmentStatus: {
+      type: String,
+      enum: ["active", "on_leave", "suspended", "former"],
+      default: "active",
+    },
+    // QAO-only private notes. Never exposed to teachers/students.
+    internalNotes: { type: String, default: "" },
+    // Phase 3: embedded weekly availability (a separate collection is not
+    // warranted unless per-subject/dated availability is required later).
+    availability: [
+      {
+        day: { type: String, trim: true },
+        start: { type: String, trim: true },
+        end: { type: String, trim: true },
+      },
+    ],
+
     resetToken: String,
     resetTokenExpiry: Date,
   },

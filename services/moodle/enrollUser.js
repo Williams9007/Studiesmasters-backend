@@ -11,7 +11,7 @@ import { getCourseIdsFor } from "./courseMapper.js";
 import { audit } from "./audit.js";
 import { config } from "./config.js";
 
-export async function enrollUser({ role, id, subjects = [], curriculum = null, packageName = null, grade = null, courseIds = null, req = null }) {
+export async function enrollUser({ role, id, subjects = [], curriculum = null, packageName = null, grade = null, courseIds = null, roleid = null, req = null }) {
   const link = await MoodleLink.findOne(role === "teacher" ? { teacherRef: id } : { studentRef: id });
   if (!link?.moodleUserId) {
     await audit({ action: "ENROLLMENT_ADDED", outcome: "skipped",
@@ -25,7 +25,9 @@ export async function enrollUser({ role, id, subjects = [], curriculum = null, p
   const toAdd = desired.filter((c) => !link.enrolledCourseIds.includes(c));
   if (!toAdd.length) return { ok: true, enrolled: [], alreadyEnrolled: desired };
 
-  const entries = toAdd.map((courseid) => ({ userid: link.moodleUserId, courseid }));
+  // Teachers are enrolled as editing teachers (roleid 3); students as students (5).
+  const effectiveRole = roleid || (role === "teacher" ? 3 : 5);
+  const entries = toAdd.map((courseid) => ({ userid: link.moodleUserId, courseid, roleid: effectiveRole }));
   try {
     await client.enroll(entries);
   } catch (err) {

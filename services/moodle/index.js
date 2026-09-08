@@ -13,7 +13,7 @@ import { verifySSO } from "./verifySSO.js";
 import { getCourseIdsFor, listMappings, upsertMapping, removeMapping } from "./courseMapper.js";
 import { runReconciliation } from "./reconciliation.js";
 import { provisionStructure, provisionStatus } from "./provisioning.js";
-import { syncAllStudents, queueSnapshot } from "./bulkSync.js";
+import { syncAllStudents, syncAllTeachers, queueSnapshot } from "./bulkSync.js";
 import { enqueue } from "./queue.js";
 import { health, bump } from "./metrics.js";
 import { processQueueBatch, startWorker } from "./worker.js";
@@ -41,6 +41,7 @@ export const moodle = {
   provisionStructure,
   provisionStatus,
   syncAllStudents,
+  syncAllTeachers,
   queueSnapshot,
   resolveStudentAccess,
   resolveSubjects,
@@ -60,7 +61,7 @@ export {
   config, secrets, createUser, updateUser, enrollUser, unenrollUser, suspendUser,
   syncProfile, syncEnrollments, generateSSO, verifySSO, getCourseIdsFor,
   listMappings, upsertMapping, removeMapping, runReconciliation, enqueue, health,
-  provisionStructure, provisionStatus, syncAllStudents, queueSnapshot,
+  provisionStructure, provisionStatus, syncAllStudents, syncAllTeachers, queueSnapshot,
   resolveStudentAccess, resolveSubjects, recordSyncStatus, syncOverview,
   listWarnings, retryFailedSyncs,
   bump as bumpMetrics, processQueueBatch, startWorker, store,

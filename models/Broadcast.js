@@ -1,10 +1,17 @@
-import mongoose from "mongoose";
+﻿import mongoose from "mongoose";
 
 const broadcastSchema = new mongoose.Schema(
   {
+    // sender is now polymorphic via senderModel. Existing documents keep
+    // working because senderModel defaults to "Admin" (the historical value).
     sender: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Admin",
+      refPath: "senderModel",
+    },
+    senderModel: {
+      type: String,
+      enum: ["Admin", "Teacher", "QaoUser"],
+      default: "Admin",
     },
 
     // Teacher-originated broadcasts use these fields; admin broadcasts continue
@@ -34,7 +41,7 @@ const broadcastSchema = new mongoose.Schema(
 
     recipientModel: {
       type: String,
-      enum: ["Student", "Teacher", "QaoUser"], // FIXED
+      enum: ["Student", "Teacher", "QaoUser"],
     },
 
     subject: {
@@ -51,18 +58,8 @@ const broadcastSchema = new mongoose.Schema(
       default: 0,
     },
 
-    // Optional link attached by admin
-    link: {
-      type: String,
-      trim: true,
-      default: null,
-    },
-
-    // Uploaded attachment (multer stores the file path)
-    attachment: {
-      type: String,
-      default: null,
-    },
+    link: { type: String, trim: true, default: null },
+    attachment: { type: String, default: null },
   },
   { timestamps: true }
 );

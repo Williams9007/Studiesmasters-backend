@@ -76,9 +76,7 @@ async function ensureCourses(categoryIds) {
   if (!config.dryRun) {
     const all = await client.getCourses(expected.map((c) => c.courseIdnumber)).catch(() => []);
     for (const c of all || []) if (c.idnumber && c.id) courseIds.set(c.idnumber, c.id);
-  }
-
-  // Locally known rows are checked FIRST (Mongo is authoritative locally) so
+  }  // Locally known rows are checked FIRST (Mongo is authoritative locally) so
   // repeated runs never re-call Moodle for courses already provisioned.
   const rows = await CourseMapping.find({
     subjectName: { $in: SUBJECTS }, curriculum: { $in: CURRICULA }, packageName: null,
@@ -114,7 +112,9 @@ async function ensureCourses(categoryIds) {
 }
 
 // Persists/refreshes a CourseMapping row for every expected course.
-async function persistMappings(categoryIds) {
+// `courseIds` includes courses created during THIS run, so a first
+// provisioning pass persists mappings immediately (not only on re-runs).
+async function persistMappings(categoryIds, courseIds = new Map()) {
   const expected = expectedCourses();
   const rows = await CourseMapping.find({
     subjectName: { $in: SUBJECTS }, curriculum: { $in: CURRICULA }, packageName: null,
@@ -125,7 +125,7 @@ async function persistMappings(categoryIds) {
   for (const c of expected) {
     const key = `${c.curriculum}|${c.grade}|${c.subject}`;
     const exp = known.get(key);
-    const moodleCourseId = exp?.targets?.[0]?.moodleCourseId ?? null;
+    const moodleCourseId = exp?.targets?.[0]?.moodleCourseId ?? courseIds.get(c.courseIdnumber) ?? null;
     const categoryId = exp?.targets?.[0]?.categoryId ?? categoryIds.get(c.categoryIdnumber) ?? null;
 
     if (moodleCourseId == null) {
@@ -159,8 +159,8 @@ export async function provisionStructure({ req = null } = {}) {
   logger.info("Moodle provisioning started");
 
   const { categoryIds, createdCategories } = await ensureCategories();
-  const { createdCourses } = await ensureCourses(categoryIds);
-  const persisted = await persistMappings(categoryIds);
+  const { courseIds, createdCourses } = await ensureCourses(categoryIds);
+  const persisted = await persistMappings(categoryIds, courseIds);
 
   const report = {
     ok: true,

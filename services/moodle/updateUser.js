@@ -21,9 +21,11 @@ export async function updateUser({ role, id, email = null, fullName = null, user
   const fields = {};
   if (email != null && email !== link.email) fields.email = email;
   if (fullName) {
-    const parts = String(fullName).trim().split(/\s+/);
+    const parts = String(fullName).trim().split(/\s+/).filter(Boolean);
     fields.firstname = parts.shift() || "";
-    fields.lastname = parts.join(" ") || fields.firstname;
+    // Single-named users: leave lastname empty (matches createUser), so the
+    // display name isn't doubled like "Lydia Lydia".
+    fields.lastname = parts.join(" ");
   }
   if (!Object.keys(fields).length) return { ok: true, skipped: true, reason: "no_changes" };
 

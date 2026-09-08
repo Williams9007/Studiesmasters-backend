@@ -40,7 +40,19 @@ const moodleLinkSchema = new mongoose.Schema(
 );
 
 // Composite uniqueness so students and teachers cannot collide on the same refs.
-moodleLinkSchema.index({ studentRef: 1 }, { unique: true, sparse: true });
-moodleLinkSchema.index({ teacherRef: 1 }, { unique: true, sparse: true });
+// IMPORTANT: these are PARTIAL unique indexes (not sparse). Spare unique indexes
+// only skip ABSENT fields, but the schema default is `null`, and MongoDB treats
+// `null` as a value — so unique+sparse made it impossible to have more than one
+// student link (every student has teacherRef:null → E11000 duplicate key).
+// A partial index on `$type: "objectId"` indexes only real refs, so multiple
+// students/teachers can coexist while each student or teacher stays unique.
+moodleLinkSchema.index(
+  { studentRef: 1 },
+  { unique: true, partialFilterExpression: { studentRef: { $type: "objectId" } } }
+);
+moodleLinkSchema.index(
+  { teacherRef: 1 },
+  { unique: true, partialFilterExpression: { teacherRef: { $type: "objectId" } } }
+);
 
 export default mongoose.models.MoodleLink || mongoose.model("MoodleLink", moodleLinkSchema);

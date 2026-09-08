@@ -10,7 +10,7 @@ import { adminAuth } from "../middleware/adminAuth.js";
 import {
   generateSSO, verifySSO, syncProfile, enrollUser, unenrollUser,
   suspendUser, runReconciliation, listMappings, upsertMapping, removeMapping,
-  provisionStructure, provisionStatus, syncAllStudents, queueSnapshot,
+  provisionStructure, provisionStatus, syncAllStudents, syncAllTeachers, queueSnapshot,
   resolveStudentAccess, syncOverview, listWarnings, retryFailedSyncs,
 } from "../services/moodle/index.js";
 
@@ -147,6 +147,12 @@ router.post("/sync-all-users", adminLimiter, adminAuth, async (req, res) => {
   catch (err) { return fail(res, 502, "Bulk sync failed.", { error: err.message }); }
 });
 
+// ---- Sync every teacher (account + editing-teacher enrollments) -------------
+router.post("/sync-all-teachers", adminLimiter, adminAuth, async (req, res) => {
+  try { return ok(res, await syncAllTeachers({ limit: req.body?.limit || 500 })); }
+  catch (err) { return fail(res, 502, "Bulk teacher sync failed.", { error: err.message }); }
+});
+
 // ---- Reconcile alias (canonical: /sync/reconcile above) --------------------
 router.post("/reconcile", adminLimiter, adminAuth, async (req, res) => {
   try { return ok(res, await runReconciliation({ limit: req.body?.limit || 200 })); }
@@ -159,8 +165,8 @@ router.get("/queue", adminLimiter, adminAuth, async (req, res) => ok(res, await 
 // ---- Access preview: resolve a student's Moodle courses WITHOUT syncing ----
 router.get("/access-preview/:id", adminLimiter, adminAuth, async (req, res) => {
   try {
-    const Student = (await import("../models/Student.js")).default;
-    const student = await Student.findById(req.params.id);
+    const { findStudent } = await import("../services/moodle/resolveStudent.js");
+    const student = await findStudent(req.params.id);
     if (!student) return fail(res, 404, "Student not found");
     const access = await resolveStudentAccess(student);
     return ok(res, {

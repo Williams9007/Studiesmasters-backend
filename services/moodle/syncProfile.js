@@ -8,15 +8,26 @@
 //   - the admin "Sync now" endpoints
 //   - the durable SyncJob worker (background sync)
 //   - automatic change hooks when MOODLE_AUTO_SYNC=true
-import Student from "../../models/Student.js";
+import { findStudent } from "./resolveStudent.js";
 import { createUser } from "./createUser.js";
 import { updateUser } from "./updateUser.js";
 import { enrollUser } from "./enrollUser.js";
 import { unenrollUser } from "./unenrollUser.js";
 import { resolveStudentAccess } from "./accessResolver.js";
 import { recordSyncStatus } from "./syncStatus.js";
+import { getCourseIdsFor } from "./courseMapper.js";
 import { audit } from "./audit.js";
 import logger from "../../utils/logger.js";
+
+// Match the access resolver's subject normalization (e.g. "Maths" -> "Mathematics").
+const SUBJECT_ALIASES = { maths: "Mathematics", math: "Mathematics", " further mathematics": "Further Mathematics",
+  "further math": "Further Mathematics", "ict": "ICT", "computing": "Computing" };
+const normSubject = (s) => {
+  const v = String(s || "").trim();
+  if (!v) return v;
+  const canonical = SUBJECT_ALIASES[v.toLowerCase()];
+  return canonical || v;
+};
 
 function runId() {
   return `sync-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -24,17 +35,113 @@ function runId() {
 
 export async function syncProfile({ id, role = "student", req = null, enroll = true }) {
   if (role === "teacher") {
-    // Teachers only need an identity in Moodle (no subject enrollment carts).
+    // Teachers get an account + enrollments derived from their TeacherAssignment
+    // rows, enrolled with the Moodle "editing teacher" role (roleid 3).
     const Teacher = (await import("../../models/teacher.js")).default;
+    const TeacherAssignment = (await import("../../models/TeacherAssignment.js")).default;
     const t = await Teacher.findById(id);
     if (!t) return { ok: false, error: "teacher not found" };
-    await createUser({ role: "teacher", id, email: t.email, fullName: t.fullName, userId: t.userId, req });
-    await updateUser({ role: "teacher", id, email: t.email, fullName: t.fullName, req });
-    return { ok: true, role };
+    // Teachers may store their name in `fullName` or the legacy `name` field.
+    // A blank name means Moodle's dashboard greeting falls back to the
+    // username (e.g. "Good morning, sm_t_..."), so always resolve a real name.
+    const teacherName = String(t.fullName || t.name || "").trim();
+    await createUser({ role: "teacher", id, email: t.email, fullName: teacherName, userId: t.userId, req });
+    await updateUser({ role: "teacher", id, email: t.email, fullName: teacherName, req });
+
+    if (!enroll) return { ok: true, role };
+
+    // ---- Teacher course resolution ------------------------------------------
+    // A teacher's courses come from their assignments. Two sources, merged:
+    //   1. TeacherAssignment rows (curriculum/package/grade/subject), when used.
+    //   2. The teacher's own subjectsTeaching + curriculum (subject across ALL
+    //      grades — a teacher may teach the same subject in several grades).
+    const CourseMapping = (await import("../../models/CourseMapping.js")).default;
+    const Subject = (await import("../../models/Subject.js")).default;
+    const assignments = await TeacherAssignment.find({ teacherId: id }).lean();
+
+    const desired = [];
+    const subjectNames = new Set();
+    const curriculumSet = new Set();
+    const addCourseIds = (ids) => { for (const cid of ids) if (!desired.includes(cid)) desired.push(cid); };
+
+    // 1) From TeacherAssignment rows (per-grade, specific).
+    for (const a of assignments) {
+      const subject = normSubject(a.subject);
+      subjectNames.add(subject);
+      curriculumSet.add(a.curriculum);
+      addCourseIds(await getCourseIdsFor({ subjects: [{ name: subject }], curriculum: a.curriculum, packageName: a.package, grade: a.grade }));
+    }
+
+    // 2) From the teacher's own subjectsTeaching — ONLY when no explicit
+    //    TeacherAssignment rows exist (legacy fallback). When assignments
+    //    exist they are authoritative: subject + class (grade), nothing more.
+    const tPopulated = await Teacher.findById(id).populate("subjectsTeaching", "name grade package curriculum moodleCourseId").lean();
+    const assignedCount = assignments.length || (tPopulated?.subjectsTeaching || []).length;
+    if (!assignments.length) {
+    const tCurriculum = normSubject(tPopulated?.curriculum);
+    for (const subj of (tPopulated?.subjectsTeaching || [])) {
+      const name = normSubject(subj?.name);
+      if (!name) continue;
+      subjectNames.add(name);
+      curriculumSet.add(subj?.curriculum || tCurriculum);
+      // The assigned Subject doc carries the teacher's assigned class (grade).
+      // Resolve ONLY that subject+grade — never all grades of the subject.
+      const ids = await getCourseIdsFor({
+        subjects: [{ name, moodleCourseId: subj?.moodleCourseId }],
+        curriculum: subj?.curriculum || tCurriculum || null,
+        packageName: subj?.package || null,
+        grade: subj?.grade || null,
+      });
+      // Fallback only when the specific subject+grade mapping is missing.
+      if (!ids.length) {
+        const q = tCurriculum ? { enabled: true, subjectName: name, curriculum: tCurriculum, grade: subj?.grade }
+                              : { enabled: true, subjectName: name, grade: subj?.grade };
+        const mappings = await CourseMapping.find(q).lean();
+        for (const m of mappings) for (const t2 of (m.targets || [])) if (!ids.includes(t2.moodleCourseId)) ids.push(t2.moodleCourseId);
+      }
+      addCourseIds(ids);
+    }
+    }
+
+    if (!desired.length) {
+      const reason = assignedCount
+        ? "NO_COURSES_FOUND: no CourseMapping rows match the teacher's subjects"
+        : "NO_ASSIGNMENTS: teacher has no subject assignments yet";
+      await audit({ action: "SYNC_WARNING", teacherRef: id, outcome: "failure", failure: reason,
+        req, createdBy: "syncProfile" }).catch(() => {});
+      return { ok: true, role, desired: [],
+        warnings: [{ code: assignedCount ? "NO_COURSES_FOUND" : "NO_ASSIGNMENTS", message: reason }] };
+    }
+
+    const subjects = [...subjectNames].map((name) => ({ name }));
+    const firstCurriculum = [...curriculumSet][0] || null;
+    await enrollUser({ role: "teacher", id, subjects, curriculum: firstCurriculum,
+      courseIds: desired, req });
+
+    // Mirror: unenroll courses the teacher holds but which are no longer assigned.
+    const link = await import("../../models/MoodleLink.js").then((m) =>
+      m.default.findOne({ teacherRef: id }).lean());
+    const held = link?.enrolledCourseIds || [];
+    const obsolete = held.filter((c) => !desired.includes(c));
+    if (obsolete.length) {
+      const { unenrollUser } = await import("./unenrollUser.js");
+      await unenrollUser({ role: "teacher", id, courseIds: obsolete, req });
+      await audit({ action: "ENROLLMENT_REMOVED", teacherRef: id,
+        detail: { courseIds: obsolete, reason: "teacher assignment removed/changed" } }).catch(() => {});
+    }
+
+    await audit({ action: "SYNC_COMPLETED", teacherRef: id, outcome: "success",
+      detail: { coursesAssigned: desired.length, removed: obsolete.length } }).catch(() => {});
+    return { ok: true, role, desired, removed: obsolete };
   }
 
-  const student = await Student.findById(id);
+  // Accept either the Mongo _id OR the public userId (e.g. "SM-ST-...").
+  const student = await findStudent(id);
   if (!student) return { ok: false, error: "student not found" };
+
+  // Normalize to the Mongo _id so downstream helpers (recordSyncStatus, audit,
+  // MoodleLink lookups) always key by the real internal id, never a userId.
+  id = student._id;
 
   const rid = runId();
   await recordSyncStatus(id, { status: "SYNCING", runId: rid });

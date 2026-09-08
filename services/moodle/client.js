@@ -66,9 +66,15 @@ export async function callWs(wsfunction, params = {}) {
 
   for (let attempt = 1; attempt <= config.wsRetries; attempt += 1) {
     try {
-      const resp = await axios.get(`${config.wsUrl}?${query.toString()}`, {
+      // POST form-encoded body (Moodle REST accepts it) — avoids HTTP 414
+      // "URI Too Long" for large batch calls (e.g. creating many courses).
+      const resp = await axios.post(config.wsUrl, query.toString(), {
         timeout: config.wsTimeoutMs,
-        headers: { Accept: "application/json" },
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        maxBodyLength: Infinity,
       });
       const body = parseBody(resp.data);
       if (body && typeof body === "object" && body.exception) {
@@ -99,11 +105,12 @@ export async function callWs(wsfunction, params = {}) {
 // Core user/admin-ish operations used by the higher-level services.
 export const client = {
   createUser(u) {
+    // NOTE: Moodle 4.5+ rejects the "confirmed" key in core_user_create_users.
     return callWs("core_user_create_users",
       { "users[0][username]": u.username, "users[0][password]": u.password || "",
         "users[0][firstname]": u.firstname, "users[0][lastname]": u.lastname,
         "users[0][email]": u.email, "users[0][auth]": "manual",
-        "users[0][idnumber]": u.idnumber || "", "users[0][confirmed]": 1 });
+        "users[0][idnumber]": u.idnumber || "" });
   },
   updateUser(id, fields) {
     const p = { "users[0][id]": id };
@@ -113,36 +120,83 @@ export const client = {
   setSuspended(id, suspended) {
     return callWs("core_user_update_users", { "users[0][id]": id, suspended: suspended ? 1 : 0 });
   },
+  // Enrolment function names differ across Moodle versions. Try the newest
+  // registered names first, then fall back. Moodle 4.5 registers
+  // enrol_manual_enrol_users / enrol_manual_unenrol_users.
+  async _enrollCall(fns, p) {
+    let lastErr = null;
+    for (const fn of fns) {
+      try {
+        return await callWs(fn, p);
+      } catch (err) {
+        lastErr = err;
+        if (err?.code === "MOODLE_WS_APPLICATION" && /invalidrecord|external_functions/i.test(err.message)) {
+          continue; // function name not registered on this Moodle -> try next
+        }
+        throw err;
+      }
+    }
+    throw lastErr;
+  },
   enroll(entries) {
     const p = {};
     entries.forEach((e, i) => {
       p[`enrolments[${i}][courseid]`] = e.courseid;
       p[`enrolments[${i}][userid]`] = e.userid;
-      if (e.roleid) p[`enrolments[${i}][roleid]`] = e.roleid;
+      // Moodle requires roleid; 5 = student (default "student" archetype role).
+      p[`enrolments[${i}][roleid]`] = e.roleid || 5;
     });
-    return callWs("core_enrol_enrol_users", p);
+    return this._enrollCall(["core_enrol_enrol_users", "enrol_manual_enrol_users", "enrol_users"], p);
   },
   unenroll(entries) {
     const p = {};
     entries.forEach((e, i) => {
       p[`enrolments[${i}][courseid]`] = e.courseid;
       p[`enrolments[${i}][userid]`] = e.userid;
+      p[`enrolments[${i}][roleid]`] = e.roleid || 5;
+      // Manual enrol method instance id (optional; Moodle falls back when omitted).
+      if (e.enrolid) p[`enrolments[${i}][enrolid]`] = e.enrolid;
     });
-    return callWs("core_enrol_unenrol_users", p);
+    return this._enrollCall(["core_enrol_unenrol_users", "enrol_manual_unenrol_users", "unenrol_users"], p);
   },
   getUsersByField(field, values) {
     const p = { field };
     (values || []).forEach((v, i) => { p[`values[${i}]`] = v; });
     return callWs("core_user_get_users_by_field", p);
   },
+  // Admin-level user search — not subject to per-course profile visibility,
+  // unlike core_user_get_users_by_field. Requires core_user_get_users in the
+  // WS service. Returns array of user objects (may be empty).
+  async searchUsersByEmail(email) {
+    try {
+      const r = await callWs("core_user_get_users", { "criteria[0][key]": "email", "criteria[0][value]": email });
+      if (r?.users?.length) return r.users;
+    } catch { /* fall through to scan */ }
+    // Fallback: some capability combinations hide email-search results, so
+    // enumerate all users and match by fetching each by id (which does return
+    // full details).
+    try {
+      const all = await callWs("core_user_get_users", { "criteria[0][key]": "", "criteria[0][value]": "" });
+      const ids = (all?.users || []).map((u) => u.id).filter(Boolean);
+      const needle = String(email || "").toLowerCase();
+      for (const uid of ids) {
+        try {
+          const det = await callWs("core_user_get_users_by_field", { field: "id", "values[0]": String(uid) });
+          const u = (det || [])[0];
+          if (u && String(u.email || "").toLowerCase() === needle) return [u];
+        } catch { /* skip user */ }
+      }
+    } catch { /* give up */ }
+    return [];
+  },
   // ---- Category / course provisioning (idempotent via idnumber) -----------
   async getCategories(idnumbers) {
-    const p = { criteria: [] };
-    (idnumbers || []).forEach((v, i) => {
-      p[`criteria[${i}][key]`] = "idnumber";
-      p[`criteria[${i}][value]`] = v;
-    });
-    return callWs("core_course_get_categories", p);
+    // Fetch ALL categories and filter client-side on idnumber — Moodle's WS
+    // criteria filtering on "idnumber" is unreliable across versions, which
+    // previously caused duplicate-category errors on re-provisioning.
+    const list = await callWs("core_course_get_categories", {});
+    const wanted = new Set(idnumbers || []);
+    return (list || []).filter((c) => wanted.has(c.idnumber));
   },
   createCategories(categories) {
     const p = {};

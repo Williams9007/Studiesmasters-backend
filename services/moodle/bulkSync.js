@@ -44,6 +44,38 @@ export async function syncAllStudents({ limit = 500 } = {}) {
   return report;
 }
 
+export async function syncAllTeachers({ limit = 500 } = {}) {
+  const Teacher = (await import("../../models/teacher.js")).default;
+  const teachers = await Teacher.find({}).select("_id").limit(limit).lean();
+  let enqueued = 0;
+  let duplicates = 0;
+  let reset = 0;
+
+  for (const t of teachers) {
+    const idempotencyKey = `syncTeacher:${t._id.toString()}`;
+    const result = await enqueue({
+      type: "syncProfile",
+      payload: { id: t._id.toString(), role: "teacher" },
+      idempotencyKey,
+    });
+    if (result.duplicate) {
+      // Job already exists — reset terminal states so a manual "Sync All
+      // Teachers" always forces a fresh pass (same semantics as students).
+      const updated = await SyncJob.updateOne(
+        { idempotencyKey, status: { $in: ["succeeded", "failed", "dead_letter"] } },
+        { $set: { status: "pending", attempts: 0, nextAttemptAt: new Date(), lastError: null }, $unset: { runId: 1, succeededAt: 1 } }
+      );
+      if (updated.modifiedCount) reset += 1; else duplicates += 1;
+    } else if (result.ok) {
+      enqueued += 1;
+    }
+  }
+
+  const report = { ok: true, teachers: teachers.length, enqueued, reset, alreadyQueued: duplicates };
+  logger.info("Bulk teacher sync enqueued:", report);
+  return report;
+}
+
 export async function queueSnapshot() {
   const [pending, inProgress, failed, deadLetter, succeeded, recentErrors, recentJobs] = await Promise.all([
     SyncJob.countDocuments({ status: "pending" }),
@@ -65,4 +97,4 @@ export async function queueSnapshot() {
   };
 }
 
-export default { syncAllStudents, queueSnapshot };
+export default { syncAllStudents, syncAllTeachers, queueSnapshot };

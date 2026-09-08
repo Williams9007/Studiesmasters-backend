@@ -1,4 +1,4 @@
-// ==========================
+﻿// ==========================
 // ENV MUST LOAD FIRST
 // ==========================
 import dotenv from "dotenv";
@@ -9,13 +9,13 @@ dotenv.config();
 // Prevents server crash on unhandled promise rejections
 // ==========================
 process.on("unhandledRejection", (reason, promise) => {
-  console.error("❌ UNHANDLED PROMISE REJECTION:", reason instanceof Error ? reason.message : reason);
+  console.error("âŒ UNHANDLED PROMISE REJECTION:", reason instanceof Error ? reason.message : reason);
   if (reason instanceof Error && reason.stack) {
     console.error(reason.stack);
   }
   // Alert the admin about the unhandled rejection
   sendSystemAlert({
-    title: "⚠️ Unhandled Promise Rejection",
+    title: "âš ï¸ Unhandled Promise Rejection",
     message: `An unhandled promise rejection occurred:\n\n${reason instanceof Error ? reason.stack || reason.message : String(reason)}`,
     key: `unhandled-rejection-${Date.now()}`,
     severity: "WARNING",
@@ -23,11 +23,11 @@ process.on("unhandledRejection", (reason, promise) => {
 });
 
 process.on("uncaughtException", (error) => {
-  console.error("❌ UNCAUGHT EXCEPTION:", error.message);
+  console.error("âŒ UNCAUGHT EXCEPTION:", error.message);
   console.error(error.stack);
   // Alert the admin about the uncaught exception
   sendSystemAlert({
-    title: "🚨 Uncaught Exception",
+    title: "ðŸš¨ Uncaught Exception",
     message: `An uncaught exception occurred:\n\n${error.stack || error.message}`,
     key: `uncaught-exception-${Date.now()}`,
     severity: "CRITICAL",
@@ -59,7 +59,8 @@ import studentRoutes from "./routes/studentRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
 import adminRoutes, { setSocketIO as setAdminSocket } from "./routes/adminRoutes.js";
 import subjectRoutes from "./routes/subjectRoutes.js";
-import qaoRoutes from "./routes/qaoRoutes.js";
+import qaoRoutes, { setQaoSocket } from "./routes/qaoRoutes.js";
+import teacherLeaveRoutes from "./routes/teacherLeaveRoutes.js";
 import teacherRoutes from "./routes/teacherRoutes.js";
 import classGroupRoutes from "./routes/classGroupRoutes.js";
 import authRoutes from "./routes/authRoutes.js";
@@ -70,6 +71,8 @@ import { setSocketIO as setBroadcastSocket } from "./Controllers/broadcasting.js
 import pushNotificationRoutes from "./routes/pushNotificationRoutes.js";
 import contactRoutes from "./routes/contactRoutes.js";
 import moodleRoutes from "./routes/moodleRoutes.js";
+import meetRoutes from "./routes/meetRoutes.js";
+import googleRoutes from "./routes/googleRoutes.js";
 
 // ==========================
 // VALIDATE ENV VARIABLES
@@ -77,12 +80,16 @@ import moodleRoutes from "./routes/moodleRoutes.js";
 const requiredEnv = ["MONGO_USER", "MONGO_PASSWORD", "MONGO_HOST", "MONGO_DB_NAME", "JWT_SECRET"];
 const missingEnv = requiredEnv.filter((key) => !process.env[key]);
 if (missingEnv.length) {
-  console.error(`❌ Missing required env variables: ${missingEnv.join(", ")}`);
+  console.error(`âŒ Missing required env variables: ${missingEnv.join(", ")}`);
   process.exit(1);
 }
 
-// Build MONGO_URI from parts for backward compatibility with existing code
-process.env.MONGO_URI = `mongodb+srv://${encodeURIComponent(process.env.MONGO_USER)}:${encodeURIComponent(process.env.MONGO_PASSWORD)}@${process.env.MONGO_HOST}/${encodeURIComponent(process.env.MONGO_DB_NAME)}`;
+// Build MONGO_URI from parts for backward compatibility with existing code.
+// If MONGO_URI is explicitly set in .env (e.g. a direct `mongodb://` replica-set
+// string that bypasses the SRV/TXT DNS lookups), honor it.
+if (!process.env.MONGO_URI) {
+  process.env.MONGO_URI = `mongodb+srv://${encodeURIComponent(process.env.MONGO_USER)}:${encodeURIComponent(process.env.MONGO_PASSWORD)}@${process.env.MONGO_HOST}/${encodeURIComponent(process.env.MONGO_DB_NAME)}`;
+}
 
 // ==========================
 // MOODLE SSO CONFIG (optional)
@@ -94,7 +101,7 @@ process.env.MONGO_URI = `mongodb+srv://${encodeURIComponent(process.env.MONGO_US
 const moodleSsoEnv = ["MOODLE_SSO_SECRET", "MOODLE_BASE_URL", "MOODLE_SSO_PATH"];
 const missingMoodleEnv = moodleSsoEnv.filter((k) => !process.env[k]);
 if (missingMoodleEnv.length) {
-  console.warn(`⚠️  Moodle SSO env vars missing (${missingMoodleEnv.join(", ")}). ` +
+  console.warn(`âš ï¸  Moodle SSO env vars missing (${missingMoodleEnv.join(", ")}). ` +
     "The /api/moodle/sso endpoint will fail until these are set to match the Moodle plugin config.");
 }
 
@@ -233,6 +240,7 @@ app.use("/api/payments", paymentRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/subjects", subjectRoutes);
 app.use("/api/qao", qaoRoutes);
+app.use("/api/teachers/leave-requests", teacherLeaveRoutes);
 app.use("/api/class-groups", classGroupRoutes);
 app.use("/api/resources", resourceRoutes);
 app.use("/api/messages", messageRoutes);
@@ -240,9 +248,11 @@ app.use("/api/admin/broadcasts", broadcastRoutes);
 app.use("/api/notifications", pushNotificationRoutes);
 app.use("/api/contact", contactRoutes);
 app.use("/api/moodle", moodleRoutes);
+app.use("/api/meet", meetRoutes);
+app.use("/api/google/oauth", googleRoutes);
 
 app.get("/", (req, res) => {
-  res.send("🚀 Studiesmasters API is running");
+  res.send("ðŸš€ Studiesmasters API is running");
 });
 
 // Handle POST to root (used by the landing page ChatBotWidget contact form)
@@ -256,7 +266,7 @@ app.post("/", async (req, res) => {
     const { sendContactMessage } = await import("./Controllers/contactController.js");
     return sendContactMessage(req, res);
   } catch (error) {
-    console.error("❌ Root POST error:", error);
+    console.error("âŒ Root POST error:", error);
     res.status(500).json({ success: false, message: "Failed to send message" });
   }
 });
@@ -286,6 +296,7 @@ const io = new Server(httpServer, {
 
 // Make io available in routes/controllers
 setAdminSocket(io);
+setQaoSocket(io);
 setBroadcastSocket(io);
 app.set("io", io);
 
@@ -299,21 +310,21 @@ app.set("onlineUsers", onlineUsers);
 // SOCKET CONNECTION
 // ==========================
 io.on("connection", (socket) => {
-  console.log("🔌 Socket connected:", socket.id);
+  console.log("ðŸ”Œ Socket connected:", socket.id);
 
   const userId = socket.handshake.query?.userId;
   if (userId) {
     socket.userId = userId;
     onlineUsers.set(userId, socket.id);
-    console.log("✅ User connected with ID:", userId);
+    console.log("âœ… User connected with ID:", userId);
   } else {
-    console.log("⚠️ Socket connected without user ID");
+    console.log("âš ï¸ Socket connected without user ID");
   }
 
   socket.on("disconnect", () => {
     if (socket.userId) {
       onlineUsers.delete(socket.userId);
-      console.log("❌ User disconnected:", socket.userId);
+      console.log("âŒ User disconnected:", socket.userId);
     }
   });
 });
@@ -322,7 +333,7 @@ io.on("connection", (socket) => {
 // GLOBAL ERROR HANDLER
 // ==========================
 app.use((err, req, res, next) => {
-  console.error("❌ Server Error:", err.message);
+  console.error("âŒ Server Error:", err.message);
   res.status(500).json({
     success: false,
     message: err.message,
@@ -346,11 +357,11 @@ const onListenError = (error) => {
   const bind = typeof PORT === "string" ? `Pipe ${PORT}` : `Port ${PORT}`;
   switch (error.code) {
     case "EACCES":
-      console.error(`❌ ${bind} requires elevated privileges`);
+      console.error(`âŒ ${bind} requires elevated privileges`);
       process.exit(1);
       break;
     case "EADDRINUSE":
-      console.error(`❌ ${bind} is already in use`);
+      console.error(`âŒ ${bind} is already in use`);
       process.exit(1);
       break;
     default:
@@ -371,9 +382,9 @@ const startServer = async () => {
         const Student = (await import("./models/Student.js")).default;
         const studentAutosyncPlugin = (await import("./services/moodle/autosync.js")).default;
         Student.schema.plugin(studentAutosyncPlugin);
-        console.log("✅ Moodle auto-sync plugin attached to Student schema.");
+        console.log("âœ… Moodle auto-sync plugin attached to Student schema.");
       } catch (e) {
-        console.warn("⚠️  Could not attach Moodle autosync plugin:", e.message);
+        console.warn("âš ï¸  Could not attach Moodle autosync plugin:", e.message);
       }
     }
 
@@ -384,7 +395,7 @@ const startServer = async () => {
         const moodleFacade = await import("./services/moodle/index.js");
         moodleFacade.startWorker({ enabled: true, intervalMs: 2000 });
       } catch (e) {
-        console.warn("⚠️  Could not start Moodle worker:", e.message);
+        console.warn("âš ï¸  Could not start Moodle worker:", e.message);
       }
     }
 
@@ -396,19 +407,32 @@ const startServer = async () => {
         const runNow = async () => { try { await runReconciliation(); } catch (e) { console.warn("Reconciliation run failed:", e.message); } };
         if (String(process.env.MOODLE_RECONCILIATION_ON_START || "false") === "true") runNow();
         setInterval(runNow, intervalMs);
-        console.log(`✅ Moodle reconciliation scheduled every ${intervalMs}ms.`);
+        console.log(`âœ… Moodle reconciliation scheduled every ${intervalMs}ms.`);
       } catch (e) {
-        console.warn("⚠️  Could not schedule Moodle reconciliation:", e.message);
+        console.warn("âš ï¸  Could not schedule Moodle reconciliation:", e.message);
       }
     }
 
+    // Virtual classroom lifecycle scheduler (Scheduled -> Live -> Completed).
+    try {
+      const { startLifecycleScheduler } = await import("./services/qao/lifecycle.service.js");
+      startLifecycleScheduler({
+        intervalMs: parseInt(process.env.CLASS_LIFECYCLE_INTERVAL_MS || "60000", 10),
+        enabled: String(process.env.CLASS_LIFECYCLE_ENABLED || "true") === "true",
+      });
+    } catch (e) {
+      console.warn("⚠️  Could not start class lifecycle scheduler:", e.message);
+    }
+
     httpServer.listen(PORT, () => {
-      console.log(`🚀 Server running on port ${PORT}`);
+      console.log(`ðŸš€ Server running on port ${PORT}`);
     });
   } catch (error) {
-    console.error("❌ Failed to start server:", error.message);
+    console.error("âŒ Failed to start server:", error.message);
     process.exit(1);
   }
 };
 
 startServer();
+
+

@@ -1,4 +1,4 @@
-// backend/routes/qaoRoutes.js
+﻿// backend/routes/qaoRoutes.js
 import express from "express";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
@@ -16,6 +16,7 @@ import MessageRecipient from "../models/MessageRecipient.js";
 import ClassGroup from "../models/ClassGroup.js";
 
 import { verifyQao } from "../middleware/verifyQao.js";
+import { sanitizeClassGroup } from "../services/qao/sanitize.js";
 
 dotenv.config();
 const router = express.Router();
@@ -146,7 +147,7 @@ router.post("/broadcast/class", verifyQao, async (req, res) => {
     const notifications = studentIds.map((studentId) => ({
       userId: studentId,
       type: "broadcast",
-      message: subject ? `${subject} — ${message}` : message,
+      message: subject ? `${subject} â€” ${message}` : message,
       read: false,
     }));
     await Notification.insertMany(notifications);
@@ -295,10 +296,10 @@ router.get("/kpis", verifyQao, async (req, res) => {
 router.get("/class-groups", verifyQao, async (req, res) => {
   try {
     const groups = await ClassGroup.find()
-      .populate("teacher", "fullName email")
-      .populate("students", "fullName email phone grade")
+      .populate("teacher", "fullName email employeeRole employmentStatus")
       .sort({ createdAt: -1 });
-    res.json({ success: true, groups: groups.map((group) => ({ ...group.toObject(), studentCount: group.students.length })) });
+    // QAO-safe: student arrays are stripped server-side, only the count is exposed
+    res.json({ success: true, groups: groups.map((g) => sanitizeClassGroup(g)) });
   } catch (err) {
     console.error("Fetch class groups error:", err);
     res.status(500).json({ success: false, message: "Server error" });
@@ -344,4 +345,18 @@ router.patch("/notifications/read-all", verifyQao, async (req, res) => {
   }
 });
 
+import tutorManagerRoutes from "./qaoTutorManagerRoutes.js";
+import { setSocketIO as setQaoNotifySocket } from "../services/qao/notify.js";
+
+// Extended Tutor Manager (QAO) dashboard endpoints - all under /api/qao/*
+router.use(tutorManagerRoutes);
+
+export const setQaoSocket = setQaoNotifySocket;
+
 export default router;
+
+
+
+
+
+
