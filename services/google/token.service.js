@@ -112,10 +112,9 @@ export async function saveToken({ email, accessToken, refreshToken, scope = "", 
 /** Generate an OAuth2 authorization URL + persist a state nonce for validation. */
 export async function beginAuthorization({ email = null } = {}) {
   const state = crypto.randomBytes(24).toString("hex");
-  const authState = crypto.randomBytes(24).toString("hex");
   await GoogleToken.updateOne(
     { provider: "google", email },
-    { $set: { authState, authStateExpiresAt: new Date(Date.now() + 10 * 60 * 1000) } },
+    { $set: { authState: state, authStateExpiresAt: new Date(Date.now() + 10 * 60 * 1000) } },
     { upsert: true }
   );
   const params = new URLSearchParams({
