@@ -17,7 +17,7 @@ import * as teachers from "../services/qao/teacher.service.js";
 import * as groups from "../services/qao/classGroup.service.js";
 import * as scheduling from "../services/qao/scheduling.service.js";
 import * as reports from "../services/qao/reports.service.js";
-import { emitToQaos } from "../services/qao/notify.js";
+import { emitToQaos, emitToTeacher, emitToStudents } from "../services/qao/notify.js";
 import * as availability from "../services/qao/availability.service.js";
 import * as leave from "../services/qao/leave.service.js";
 import * as workloadSvc from "../services/qao/workload.service.js";
@@ -27,6 +27,8 @@ import * as auditSvc from "../services/qao/audit.service.js";
 import * as notif from "../services/qao/notification.service.js";
 import * as exporter from "../services/qao/export.service.js";
 import { logQaoAction } from "../services/qao/audit.service.js";
+import * as timetable from "../services/timetable.service.js";
+import Teacher from "../models/teacher.js";
 
 const router = Router();
 
@@ -133,6 +135,68 @@ router.patch("/timetables/:id", verifyQao, async (req, res) => {
       .lean();
     if (!timetable) return res.status(404).json({ success: false, message: "Timetable not found" });
     emitToQaos("timetable:reviewed", { timetableId: timetable._id, status: timetable.status });
+
+    // Tell the teacher who submitted it what the Tutor Manager decided
+    // (durable notification + "notification:new" socket event to their room,
+    // plus a dedicated "timetable:reviewed" event the dashboard bell listens for).
+    const reviewedTeacher = timetable.teacherId?._id || timetable.teacherId;
+    if (reviewedTeacher && status) {
+      try {
+        await notif.notifyTeacher({
+          teacherId: reviewedTeacher,
+          title: `Timetable ${status}`,
+          message: `${timetable.subjectId?.name || "Your timetable"} review result: ${status}.${feedback ? ` Feedback: ${feedback}` : ""}`,
+          type: status === "Approved" ? "info" : "warning",
+        });
+        emitToTeacher(reviewedTeacher, "timetable:reviewed", {
+          timetableId: timetable._id,
+          status,
+          feedback: feedback || "",
+          subject: timetable.subjectId?.name || "",
+        });
+      } catch { /* a notification failure must never break the review */ }
+
+      // Web push to the teacher's subscribed devices (best-effort).
+      try {
+        const push = await import(new URL("../Controllers/pushNotificationController.js", import.meta.url).href);
+        if (typeof push.sendPushToTeacher === "function") {
+          await push
+            .sendPushToTeacher(
+              reviewedTeacher,
+              `Timetable ${status}`,
+              `${timetable.subjectId?.name || "Your timetable"} review result: ${status}.${feedback ? ` Feedback: ${feedback}` : ""}`,
+              "/teacher/dashboard"
+            )
+            .catch(() => {});
+        }
+      } catch { /* push is best-effort */ }
+    }
+
+    // An APPROVED timetable is the one students actually follow, so notify every
+    // student enrolled in that subject (durable + socket) that it is live.
+    if (status === "Approved" && timetable.subjectId) {
+      try {
+        const Student = (await import("../models/Student.js")).default;
+        const enrolled = await Student.find({ subjectsEnrolled: timetable.subjectId })
+          .select("_id")
+          .lean();
+        const studentIds = enrolled.map((s) => s._id);
+        if (studentIds.length) {
+          await notif.notifyStudents({
+            studentIds,
+            title: "Your timetable was updated",
+            message: `The ${timetable.subjectId?.name || "class"}${timetable.classLevel ? ` (${timetable.classLevel})` : ""} timetable was approved and is now live.`,
+            type: "info",
+          });
+          emitToStudents(studentIds, "timetable:published", {
+            subject: timetable.subjectId?.name || "",
+            classLevel: timetable.classLevel || "",
+            status: "Approved",
+          });
+        }
+      } catch { /* student fan-out is best-effort; the review still stands */ }
+    }
+
     res.json({ success: true, timetable: sanitizeTeacher(timetable) });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
@@ -195,6 +259,50 @@ router.get("/search", verifyQao, async (req, res) => {
   }
 });
 
+// -------------------- Recurring weekly Timetable (grouped per class) ------
+// The Tutor Manager feeds in a class's day/time slots manually, assigns a
+// teacher, and generates the concrete sessions (each with a Google Calendar
+// event + Meet link) across a term date range.
+router.get("/timetable", verifyQao, async (req, res) => {
+  try {
+    const timetableData = await timetable.listWeeklyTimetable({
+      from: req.query.from,
+      to: req.query.to,
+    });
+    res.json({ success: true, timetable: timetableData });
+  } catch (err) {
+    console.error("Timetable list error:", err);
+    res.status(500).json({ success: false, message: "Failed to load timetable" });
+  }
+});
+
+router.patch("/timetable/:id/slots", verifyQao, async (req, res) => {
+  try {
+    const entry = await timetable.saveWeeklySlots({
+      classGroupId: req.params.id,
+      slots: req.body?.slots,
+      teacher: req.body?.teacher,
+    });
+    res.json({ success: true, classGroup: entry });
+  } catch (err) {
+    res.status(err.message === "Class group not found" ? 404 : 400).json({ success: false, message: err.message });
+  }
+});
+
+router.post("/timetable/:id/generate", verifyQao, async (req, res) => {
+  try {
+    const result = await timetable.generateRangeSessions({
+      classGroupId: req.params.id,
+      startDate: req.body?.startDate,
+      endDate: req.body?.endDate,
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(err.message === "Class group not found" ? 404 : 400).json({ success: false, message: err.message });
+  }
+});
+
+// -------------------- Scheduling engine (ClassSession) --------------------
 // -------------------- Scheduling engine (ClassSession) --------------------
 router.get("/sessions", verifyQao, async (req, res) => {
   try {
@@ -435,6 +543,24 @@ router.get("/performance/snapshots", verifyQao, async (req, res) => {
     res.json({ success: true, snapshots });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Mark a teacher's performance for a month (manual QAO rating + remark).
+router.patch("/performance/:id/rating", verifyQao, async (req, res) => {
+  try {
+    const month = req.query.month || perf.monthKey();
+    const { rating, remark } = req.body || {};
+    const result = await perf.saveRating({ teacherId: req.params.id, month, rating, remark });
+    await logQaoAction({
+      action: "TEACHER_PERFORMANCE_RATED",
+      resource: "TeacherPerformanceSnapshot",
+      resourceId: result.snapshotId,
+      details: { teacherId: req.params.id, month, rating: result.rating },
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(err.message === "teacherId is required" ? 400 : 400).json({ success: false, message: err.message });
   }
 });
 

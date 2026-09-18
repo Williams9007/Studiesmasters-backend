@@ -14,7 +14,8 @@
 // emitted once per session per stage using an in-memory de-dupe set.
 import ClassSession from "../../models/ClassSession.js";
 import { emitToQaos, emitToTeacher, emitToStudents } from "./notify.js";
-import { createNotification } from "./notification.service.js";
+import { createNotification, notifyStudents } from "./notification.service.js";
+import { sendClassReminderEmail } from "../../utils/sendTimetableEmail.js";
 import { logQaoAction } from "./audit.service.js";
 import { syncClassSession, CLASS_SYNC_ACTIONS } from "../moodle/syncClass.js";
 import logger from "../../utils/logger.js";
@@ -94,9 +95,37 @@ async function remind({ session, kind, minutesLabel }) {
     } catch { /* non-fatal */ }
   }
 
-  // Students: socket only (their class group members).
+  // Students: durable notification + socket (their class group members), so the
+  // reminder is still waiting in their dashboard bell when they come back online.
   try {
-    emitToStudents(await groupStudentIds(session.classGroup), "class:starting", payload);
+    const studentIds = await groupStudentIds(session.classGroup);
+    if (studentIds.length) {
+      await notifyStudents({
+        studentIds,
+        title: "Class reminder",
+        message: `Your ${payload.subject}${payload.grade ? ` (${payload.grade})` : ""} class starts in ${minutesLabel}.`,
+        type: "info",
+      });
+      emitToStudents(studentIds, "class:starting", payload);
+
+      // Reminder emails are opt-in (CLASS_REMINDER_EMAILS=true) to avoid spam.
+      if (String(process.env.CLASS_REMINDER_EMAILS || "false") === "true") {
+        const Student = (await import("../../models/Student.js")).default;
+        const students = await Student.find({ _id: { $in: studentIds } }).select("fullName email").lean();
+        for (const s of students) {
+          if (!s.email) continue;
+          await sendClassReminderEmail({
+            to: s.email,
+            name: s.fullName,
+            subject: payload.subject,
+            grade: payload.grade,
+            date: session.date,
+            startTime: payload.startTime,
+            minutesLabel,
+          });
+        }
+      }
+    }
   } catch { /* non-fatal */ }
 
   // QAO room: socket only (no durable copy to avoid notification spam).
@@ -127,6 +156,48 @@ async function goCompleted(session) {
   await logQaoAction({ action: "CLASS_AUTO_COMPLETED", resource: "ClassSession", resourceId: session._id, details: { by: "lifecycle" } });
 }
 
+// ── Plan-duration expiry reminders ───────────────────────────────────────────
+// Warns students when their study plan (finishDate) is about to expire so they
+// renew: at 7 days, 3 days, 1 day before, and once when expired. De-duped per
+// student/bucket/day so the tick can run as often as it likes.
+const expiryReminded = new Set(); // `${studentId}:${bucket}:${yyyy-mm-dd}`
+
+async function checkPlanExpiry(now = new Date()) {
+  try {
+    const Student = (await import("../../models/Student.js")).default;
+    const { notifyStudent } = await import("./notification.service.js");
+    const { emitToStudent } = await import("./notify.js");
+    const horizon = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const students = await Student.find({ finishDate: { $ne: null, $lte: horizon } })
+      .select("fullName finishDate")
+      .lean();
+    const today = now.toISOString().slice(0, 10);
+    let sent = 0;
+    for (const s of students) {
+      if (!s.finishDate) continue;
+      const daysLeft = Math.ceil((new Date(s.finishDate).getTime() - now.getTime()) / 86400000);
+      const bucket = daysLeft < 0 ? "expired" : daysLeft <= 1 ? "1d" : daysLeft <= 3 ? "3d" : "7d";
+      const key = `${s._id}:${bucket}:${today}`;
+      if (expiryReminded.has(key)) continue;
+      expiryReminded.add(key);
+      const title = daysLeft < 0
+        ? "Plan expired — renew now"
+        : daysLeft <= 1
+          ? "Your plan expires tomorrow"
+          : `Your plan expires in ${daysLeft} day(s)`;
+      const message = daysLeft < 0
+        ? `Your StudiesMasters plan expired on ${new Date(s.finishDate).toLocaleDateString()}. Renew now to keep your live classes, Moodle access and tutor support.`
+        : `Your StudiesMasters plan ends on ${new Date(s.finishDate).toLocaleDateString()} (${daysLeft} day(s) left). Renew soon so you don't lose access to your live classes on Moodle.`;
+      try {
+        await notifyStudent({ studentId: s._id, title, message, type: daysLeft < 0 ? "warning" : "info" });
+        emitToStudent(String(s._id), "notification:new", { title, message, createdAt: new Date().toISOString() });
+        sent += 1;
+      } catch { /* non-fatal */ }
+    }
+    return sent;
+  } catch { return 0; }
+}
+
 /** One scheduler pass. Safe to call repeatedly; every step is non-fatal. */
 export async function runLifecycleTick() {
   const now = new Date();
@@ -150,15 +221,15 @@ export async function runLifecycleTick() {
     const sinceEnd = minutesSinceEnd(s, now);
 
     if (mutable.status === "scheduled") {
-      if (until <= 24 * 60 && until > 60) await remind({ session: s, kind: "r24h", minutesLabel: "24 hours" });
-      if (until <= 60 && until > 10) await remind({ session: s, kind: "r1h", minutesLabel: "1 hour" });
-      if (until <= 10 && until > 0) await remind({ session: s, kind: "r10m", minutesLabel: "10 minutes" });
+      if (until <= 24 * 60 && until > 60) await remind({ session: s, kind: "day-before", minutesLabel: "24 hours" });
+      if (until <= 60 && until > 30) await remind({ session: s, kind: "r1h", minutesLabel: "1 hour" });
+      if (until <= 30 && until > 0) await remind({ session: s, kind: "r30m", minutesLabel: "30 minutes" });
       if (until <= 0 && sinceEnd < 0) { await goLive(mutable); transitions++; }
     } else if (mutable.status === "live") {
       if (sinceEnd >= 0) { await goCompleted(mutable); transitions++; }
     }
   }
-  return { checked: sessions.length, transitions };
+  return { checked: sessions.length, transitions, expiryAlerts: await checkPlanExpiry(now) };
 }
 
 let schedulerStarted = false;

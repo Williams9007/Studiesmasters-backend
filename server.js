@@ -53,6 +53,7 @@ import connectDB from "./config/db.js";
 import { init as initSystemGuard } from "./services/systemGuard.js";
 import { initSystemAlerts, sendSystemAlert } from "./services/systemAlertService.js";
 import systemGuardRoutes from "./routes/systemGuardRoutes.js";
+import { joinRoleRooms, handshakeIdentity } from "./utils/socketRooms.js";
 
 // Routes
 import studentRoutes from "./routes/studentRoutes.js";
@@ -73,6 +74,8 @@ import contactRoutes from "./routes/contactRoutes.js";
 import moodleRoutes from "./routes/moodleRoutes.js";
 import meetRoutes from "./routes/meetRoutes.js";
 import googleRoutes from "./routes/googleRoutes.js";
+import recordingRoutes from "./routes/recordingRoutes.js";
+import streamRoutes from "./routes/streamRoutes.js";
 
 // ==========================
 // VALIDATE ENV VARIABLES
@@ -250,6 +253,8 @@ app.use("/api/contact", contactRoutes);
 app.use("/api/moodle", moodleRoutes);
 app.use("/api/meet", meetRoutes);
 app.use("/api/google/oauth", googleRoutes);
+app.use("/api/recordings", recordingRoutes);
+app.use("/api/stream", streamRoutes);
 
 app.get("/", (req, res) => {
   res.send("ðŸš€ Studiesmasters API is running");
@@ -312,7 +317,9 @@ app.set("onlineUsers", onlineUsers);
 io.on("connection", (socket) => {
   console.log("ðŸ”Œ Socket connected:", socket.id);
 
-  const userId = socket.handshake.query?.userId;
+  // Role + id come from the handshake (auth payload wins over query) and decide
+  // which role rooms this socket joins. See utils/socketRooms.js.
+  const { userId, role } = handshakeIdentity(socket);
   if (userId) {
     socket.userId = userId;
     onlineUsers.set(userId, socket.id);
@@ -320,6 +327,17 @@ io.on("connection", (socket) => {
   } else {
     console.log("âš ï¸ Socket connected without user ID");
   }
+
+  // ---- Role rooms (server-side auto-join) ---------------------------------
+  // Every server-side notification is emitted to a role room (utils/socketRooms.js).
+  // Joining here means clients need no extra handshake; the explicit "*-join"
+  // events below are still supported for clients that announce their own room.
+  joinRoleRooms(socket, role, userId);
+
+  socket.on("student-join", (id) => joinRoleRooms(socket, "student", id || userId));
+  socket.on("teacher-join", (id) => joinRoleRooms(socket, "teacher", id || userId));
+  socket.on("qao-join", (id) => joinRoleRooms(socket, "qao", id || userId));
+  socket.on("admin-join", (id) => joinRoleRooms(socket, "admin", id || userId));
 
   socket.on("disconnect", () => {
     if (socket.userId) {
@@ -413,7 +431,7 @@ const startServer = async () => {
       }
     }
 
-    // Virtual classroom lifecycle scheduler (Scheduled -> Live -> Completed).
+    // Virtual classroom lifecycle scheduler
     try {
       const { startLifecycleScheduler } = await import("./services/qao/lifecycle.service.js");
       startLifecycleScheduler({
@@ -422,6 +440,15 @@ const startServer = async () => {
       });
     } catch (e) {
       console.warn("⚠️  Could not start class lifecycle scheduler:", e.message);
+    }
+
+    // Recording detection worker (polls for completed Google Meet recordings)
+    try {
+      const { startRecordingWorker } = await import("./workers/recording.worker.js");
+      startRecordingWorker();
+      console.log("✅ Recording detection worker started");
+    } catch (e) {
+      console.warn("⚠️  Could not start recording worker:", e.message);
     }
 
     httpServer.listen(PORT, () => {

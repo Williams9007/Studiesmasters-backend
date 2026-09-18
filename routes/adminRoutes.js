@@ -18,7 +18,13 @@ import { validate, schemas } from "../middleware/validate.js";
 import Users from "../models/Users.js";
 import Payment from "../models/Payment.js";
 import ClassGroup from "../models/ClassGroup.js";
+import ClassSession from "../models/ClassSession.js";
 import { curriculumCatalog } from "../data/curriculumCatalog.js";
+import * as timetableSvc from "../services/timetable.service.js";
+import * as classGroupService from "../services/qao/classGroup.service.js";
+import * as leaveService from "../services/qao/leave.service.js";
+import * as workloadService from "../services/qao/workload.service.js";
+import * as schedulingSvc from "../services/qao/scheduling.service.js";
 
 
 const router = express.Router();
@@ -189,6 +195,82 @@ router.post("/verify-otp", validate(schemas.verifyOtp), async (req, res) => {
     res.json({ success: true, token });
   } catch (err) {
     res.status(500).json({ message: "Server error" });
+  }
+});
+
+// ─── CLASS RECORDS (attendance + performance, merged) ────────────────────────
+/**
+ * GET /api/admin/performance (adminAuth)
+ * Site-wide class records computed from ClassSession.attendance — which is fed
+ * by BOTH the main website AND the Moodle virtual classroom — so this is the
+ * merged attendance/performance record for every teacher and student.
+ */
+router.get("/performance", adminAuth, async (req, res) => {
+  try {
+    const ClassGroup = (await import("../models/ClassGroup.js")).default;
+    const groups = await ClassGroup.find()
+      .populate("teacher", "fullName")
+      .populate("students", "fullName")
+      .lean();
+    const sessions = await ClassSession.find({ status: { $in: ["completed", "live"] } })
+      .select("classGroup attendance")
+      .lean();
+
+    const byGroup = new Map();
+    for (const s of sessions) {
+      const key = String(s.classGroup?._id || s.classGroup);
+      if (!byGroup.has(key)) byGroup.set(key, []);
+      byGroup.get(key).push(s);
+    }
+
+    const teachers = [];
+    const students = [];
+    for (const g of groups) {
+      const groupSessions = byGroup.get(String(g._id)) || [];
+      const total = groupSessions.length;
+      if (g.teacher) {
+        let joins = 0;
+        let minutes = 0;
+        for (const s of groupSessions) {
+          for (const a of s.attendance || []) { joins += 1; minutes += a.duration || 0; }
+        }
+        teachers.push({
+          teacherId: g.teacher._id,
+          name: g.teacher.fullName || "Teacher",
+          classGroup: g.code,
+          subject: g.subject,
+          grade: g.grade,
+          students: (g.students || []).length,
+          completedSessions: total,
+          attendanceJoins: joins,
+          minutes,
+        });
+      }
+      for (const st of g.students || []) {
+        let attended = 0;
+        let minutes = 0;
+        for (const s of groupSessions) {
+          const rec = (s.attendance || []).find((a) => String(a.student) === String(st._id));
+          if (rec) { attended += 1; minutes += rec.duration || 0; }
+        }
+        students.push({
+          studentId: st._id,
+          name: st.fullName || "Student",
+          classGroup: g.code,
+          subject: g.subject,
+          totalSessions: total,
+          attended,
+          attendancePct: total ? Math.round((attended / total) * 100) : 0,
+          minutes,
+        });
+      }
+    }
+    teachers.sort((a, b) => b.completedSessions - a.completedSessions);
+    students.sort((a, b) => b.attendancePct - a.attendancePct || a.name.localeCompare(b.name));
+    res.json({ success: true, teachers, students });
+  } catch (err) {
+    console.error("Admin performance error:", err);
+    res.status(500).json({ success: false, message: "Failed to load class records" });
   }
 });
 
@@ -996,4 +1078,316 @@ router.put("/subjects/:id/moodle-course", adminAuth, async (req, res) => {
   }
 });
 
+// ================= TIMETABLE MANAGEMENT (Admin dashboard) =================
+// Reuses the exact same services as the Tutor Manager so admins can manage the
+// recurring weekly timetable for every class (manual day/time slots, teacher
+// assignment, daily-schedule generation with Google Calendar + Meet links).
+
+// Bulk push every scheduled timetable session to Moodle's native Calendar
+// (idempotent: existing Moodle events are updated, not duplicated). Optional
+// filters: { classGroupId, from, to }. Display-sync failures are queued for the
+// Moodle worker retry and never break the response.
+router.post("/timetable/sync-moodle", adminAuth, async (req, res) => {
+  try {
+    const { syncClassSession, CLASS_SYNC_ACTIONS } = await import("../services/moodle/index.js");
+    const ClassSession = (await import("../models/ClassSession.js")).default;
+
+    const query = { status: { $in: ["scheduled", "live"] } };
+    if (req.body?.classGroupId) query.classGroup = req.body.classGroupId;
+    if (req.body?.from || req.body?.to) {
+      query.date = {};
+      if (req.body.from) query.date.$gte = new Date(req.body.from);
+      if (req.body.to) query.date.$lte = new Date(req.body.to);
+    }
+
+    const sessions = await ClassSession.find(query)
+      .populate("classGroup", "code subject grade curriculum")
+      .populate("teacher", "fullName")
+      .sort({ date: 1, startTime: 1 })
+      .lean();
+
+    const results = await Promise.allSettled(
+      sessions.map((s) =>
+        syncClassSession(s, {
+          action: s.meetingStatus === "ready" ? CLASS_SYNC_ACTIONS.MEETING_READY : CLASS_SYNC_ACTIONS.UPDATED,
+          sessionId: s._id,
+        })
+      )
+    );
+
+    let synced = 0;
+    let queued = 0;
+    let failed = 0;
+    for (const r of results) {
+      const v = r.status === "fulfilled" ? r.value : null;
+      if (!v) { failed += 1; continue; }
+      if (v.synced) synced += 1;
+      else if (v.queued) queued += 1;
+      else failed += 1;
+    }
+
+    res.json({ success: true, total: sessions.length, synced, queued, failed });
+  } catch (err) {
+    console.error("Admin timetable Moodle sync error:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Grouped weekly timetable per class (sessions included underneath).
+router.get("/timetable", adminAuth, async (req, res) => {
+  try {
+    const timetable = await timetableSvc.listWeeklyTimetable({
+      from: req.query.from,
+      to: req.query.to,
+    });
+    res.json({ success: true, timetable });
+  } catch (err) {
+    console.error("Admin timetable list error:", err);
+    res.status(500).json({ success: false, message: "Failed to load timetable" });
+  }
+});
+
+// Save a class's weekly slots and/or assign a teacher.
+router.patch("/timetable/:id/slots", adminAuth, async (req, res) => {
+  try {
+    const entry = await timetableSvc.saveWeeklySlots({
+      classGroupId: req.params.id,
+      slots: req.body?.slots,
+      teacher: req.body?.teacher,
+    });
+    res.json({ success: true, classGroup: entry });
+  } catch (err) {
+    res.status(err.message === "Class group not found" ? 404 : 400).json({ success: false, message: err.message });
+  }
+});
+
+// Generate concrete sessions across a term range from the class's weekly slots.
+router.post("/timetable/:id/generate", adminAuth, async (req, res) => {
+  try {
+    const result = await timetableSvc.generateRangeSessions({
+      classGroupId: req.params.id,
+      startDate: req.body?.startDate,
+      endDate: req.body?.endDate,
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(err.message === "Class group not found" ? 404 : 400).json({ success: false, message: err.message });
+  }
+});
+
+// Manually create a class (with weekly slots + optional teacher) for the admin
+// Scheduler screen. Delegates to the shared QAO-safe classGroup service.
+router.post("/class-groups", adminAuth, async (req, res) => {
+  try {
+    const group = await classGroupService.createClassGroup(req.body);
+    res.status(201).json({ success: true, classGroup: group });
+  } catch (err) {
+    res.status(err.message.includes("already exists") ? 409 : 400).json({ success: false, message: err.message });
+  }
+});
+
 export default router;
+
+// ================= ADMIN SCHEDULING =================
+// Admin Scheduling panel: sessions / class-groups / teachers / workload /
+// leave / live-ops — all admin-only (adminAuth). Week cap: 40h per rolling
+// 7-day window (SCHEDULE_HOURS_PER_WEEK).
+const SCHEDULE_HOURS_PER_WEEK = 40;
+const SCHEDULE_MINUTES_PER_WEEK = SCHEDULE_HOURS_PER_WEEK * 60;
+
+function sessionMinutes(session) {
+  const [sh, sm] = String(session.startTime || "00:00").split(":").map(Number);
+  const [eh, em] = String(session.endTime || "00:00").split(":").map(Number);
+  return Math.max(0, (eh * 60 + (em || 0)) - (sh * 60 + (sm || 0)));
+}
+
+function oid(hex) {
+  return new mongoose.Types.ObjectId(hex);
+}
+
+// Minimal safe session shape for admin scheduling panels (no student PII).
+const SAFE_SESSION_FIELDS = "code curriculum grade subject capacity status schedule weeklySlots meetingLink";
+function safeSession(s) {
+  const sg = s.classGroup;
+  return {
+    _id: s._id,
+    date: s.date,
+    startTime: s.startTime,
+    endTime: s.endTime,
+    durationMinutes: s.durationMinutes,
+    status: s.status,
+    meetingLink: s.meetingLink,
+    meetingStatus: s.meetingStatus,
+    meetingCode: s.meetingCode,
+    classGroup: sg ? { _id: sg._id, code: sg.code, subject: sg.subject, grade: sg.grade } : null,
+    teacher: s.teacher
+      ? { _id: s.teacher._id, fullName: s.teacher.fullName || s.teacher.name, email: s.teacher.email }
+      : null,
+    substituteTeacher: s.substituteTeacher
+      ? { _id: s.substituteTeacher._id, fullName: s.substituteTeacher.fullName || s.substituteTeacher.name }
+      : null,
+  };
+}
+
+router.get("/scheduling/sessions", adminAuth, async (req, res) => {
+  try {
+    const sessions = await timetableSvc.listSessions({ from: req.query.from, to: req.query.to, teacherId: req.query.teacher, classGroupId: req.query.group, status: req.query.status });
+    res.json({ success: true, sessions });
+  } catch (err) {
+    console.error("Admin scheduling sessions error:", err);
+    res.status(500).json({ success: false, message: "Failed to load sessions" });
+  }
+});
+
+router.patch("/scheduling/sessions/:id", adminAuth, async (req, res) => {
+  try {
+    const session = await timetableSvc.updateSession(req.params.id, req.body);
+    res.json({ success: true, session });
+  } catch (err) {
+    console.error("Admin scheduling update error:", err);
+    res.status(err.message?.includes("not found") ? 404 : 400).json({ success: false, message: err.message });
+  }
+});
+
+router.delete("/scheduling/sessions/:id", adminAuth, async (req, res) => {
+  try {
+    await timetableSvc.cancelSession(req.params.id);
+    res.json({ success: true, message: "Session cancelled" });
+  } catch (err) {
+    console.error("Admin scheduling cancel error:", err);
+    res.status(err.message?.includes("not found") ? 404 : 400).json({ success: false, message: err.message });
+  }
+});
+
+// Today's live/active sessions for the Live Ops panel.
+router.get("/scheduling/today", adminAuth, async (req, res) => {
+  try {
+    const sessions = await schedulingSvc.todaySessions();
+    res.json({ success: true, sessions: sessions.map(safeSession) });
+  } catch (err) {
+    console.error("Admin scheduling today error:", err);
+    res.status(500).json({ success: false, message: "Failed to load today's sessions" });
+  }
+});
+
+// Class groups for the scheduling panel (with weekly slots exposed).
+router.get("/scheduling/class-groups", adminAuth, async (req, res) => {
+  try {
+    const groups = await ClassGroup.find().populate("teacher", "fullName email employeeRole employmentStatus photo").sort({ createdAt: -1 });
+    res.json({ success: true, groups: groups.map((g) => ({ ...g.toObject(), studentCount: g.students?.length || 0, effectiveSlots: effectiveSlots(g), weeklySlots: g.weeklySlots || [] })) });
+  } catch (err) {
+    console.error("Admin scheduling class-groups error:", err);
+    res.status(500).json({ success: false, message: "Failed to load class groups" });
+  }
+});
+
+// Create a class group from the admin scheduler.
+router.post("/scheduling/class-groups", adminAuth, async (req, res) => {
+  try {
+    const group = await classGroupService.createClassGroup(req.body);
+    res.status(201).json({ success: true, classGroup: group });
+  } catch (err) {
+    res.status(err.message.includes("already exists") ? 409 : 400).json({ success: false, message: err.message });
+  }
+});
+
+// Update a class group's weekly slots + teacher assignment.
+router.patch("/scheduling/class-groups/:id", adminAuth, async (req, res) => {
+  try {
+    const entry = await timetableSvc.saveWeeklySlots({ classGroupId: req.params.id, slots: req.body?.slots, teacher: req.body?.teacher });
+    res.json({ success: true, classGroup: entry });
+  } catch (err) {
+    res.status(err.message === "Class group not found" ? 404 : 400).json({ success: false, message: err.message });
+  }
+});
+
+// Teachers list for dropdowns.
+router.get("/scheduling/teachers", adminAuth, async (req, res) => {
+  try {
+    const teachers = await Teacher.find({ employmentStatus: { $ne: "former" } }).select("fullName email employeeRole employmentStatus photo subjectsTeaching").populate("subjectsTeaching", "name").sort({ fullName: 1 }).lean();
+    res.json({ success: true, teachers });
+  } catch (err) {
+    console.error("Admin scheduling teachers error:", err);
+    res.status(500).json({ success: false, message: "Failed to load teachers" });
+  }
+});
+
+// Workload overview (40h cap flag).
+router.get("/scheduling/workload", adminAuth, async (req, res) => {
+  try {
+    const weeks = await workloadService.weeklyHours();
+    const teachers = await Teacher.find({ employmentStatus: { $ne: "former" } }).select("fullName email employeeRole employmentStatus photo subjectsTeaching").populate("subjectsTeaching", "name").lean();
+    const workload = teachers.map((t) => {
+      const h = weeks.get(String(t._id)) || { hours: 0, sessions: 0 };
+      const overCap = h.hours > SCHEDULE_HOURS_PER_WEEK;
+      return {
+        teacherId: t._id,
+        name: t.fullName || t.name || "Teacher",
+        email: t.email,
+        employmentStatus: t.employmentStatus,
+        subjects: (t.subjectsTeaching || []).map((s) => s.name),
+        hours: h.hours,
+        sessions: h.sessions,
+        overCap,
+        capHours: SCHEDULE_HOURS_PER_WEEK,
+        status: h.hours >= 30 ? "overloaded" : h.hours >= 20 ? "heavy" : h.hours >= 10 ? "balanced" : "underloaded",
+      };
+    });
+    res.json({ success: true, workload });
+  } catch (err) {
+    console.error("Admin scheduling workload error:", err);
+    res.status(500).json({ success: false, message: "Failed to load workload" });
+  }
+});
+
+// Leave requests for admin review.
+router.get("/scheduling/leave-requests", adminAuth, async (req, res) => {
+  try {
+    const LeaveRequest = (await import("../models/LeaveRequest.js")).default;
+    const query = {};
+    if (req.query.status) query.status = req.query.status;
+    const requests = await LeaveRequest.find(query).populate("teacher", "fullName email employeeRole").sort({ createdAt: -1 });
+    res.json({ success: true, requests });
+  } catch (err) {
+    console.error("Admin scheduling leave error:", err);
+    res.status(500).json({ success: false, message: "Failed to load leave requests" });
+  }
+});
+
+// Approve / reject a leave request as admin.
+router.patch("/scheduling/leave-requests/:id", adminAuth, async (req, res) => {
+  try {
+    const LeaveRequest = (await import("../models/LeaveRequest.js")).default;
+    const request = await LeaveRequest.findById(req.params.id);
+    if (!request) return res.status(404).json({ success: false, message: "Leave request not found" });
+    if (["approved", "rejected"].includes(req.body.status)) {
+      request.status = req.body.status;
+      request.reviewedBy = req.admin?._id || req.admin?.id;
+      request.reviewNote = req.body.reviewNote || "";
+      await request.save();
+    }
+    res.json({ success: true, request });
+  } catch (err) {
+    console.error("Admin scheduling leave review error:", err);
+    res.status(500).json({ success: false, message: "Failed to review leave request" });
+  }
+});
+
+// Live ops stats.
+router.get("/scheduling/live-ops", adminAuth, async (req, res) => {
+  try {
+    const LiveSession = await import("../models/ClassSession.js");
+    const ClassSession = LiveSession.default;
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const todayEnd = new Date(todayStart); todayEnd.setDate(todayEnd.getDate() + 1);
+    const liveSessions = await ClassSession.find({ date: { $gte: todayStart, $lt: todayEnd }, status: "live" })
+      .populate("teacher", "fullName email")
+      .populate("classGroup", "code subject grade")
+      .lean();
+    const totalMinutes = liveSessions.reduce((sum, s) => sum + (s.durationMinutes || 0), 0);
+    res.json({ success: true, ops: { liveCount: liveSessions.length, total: liveSessions.length, avgDuration: liveSessions.length ? Math.round(totalMinutes / liveSessions.length) : 0 }, sessions: liveSessions.map(safeSession) });
+  } catch (err) {
+    console.error("Admin scheduling live-ops error:", err);
+    res.status(500).json({ success: false, message: "Failed to load live operations" });
+  }
+});

@@ -12,11 +12,18 @@ import Payment from "../models/Payment.js";
 import Subject from "../models/Subject.js";
 import Broadcast from "../models/Broadcast.js";
 import Assignment from "../models/Assignment.js";
+import Notification from "../models/Notification.js";
+import ClassSession from "../models/ClassSession.js";
+import ClassGroup from "../models/ClassGroup.js";
 import { sendWelcomeEmail } from "../message/sendWelcomeEmail.js";
 import { studentAuth } from "../middleware/studentAuth.js";
 import { verifyTurnstile } from "../middleware/verifyTurnstile.js";
 import { curriculumCatalog } from "../data/curriculumCatalog.js";
 import { createPasswordResetToken, hashPasswordResetToken, sendPasswordResetEmail } from "../utils/passwordReset.js";
+import {
+  listForUser, markRead, markAllRead, unreadCount,
+  deleteNotification, clearNotifications,
+} from "../services/qao/notification.service.js";
 
 dotenv.config();
 const router = express.Router();
@@ -315,7 +322,191 @@ router.get("/:studentId/subjects", async (req, res) => {
   }
 });
 
-/* ==================== STUDENT BROADCASTS ==================== */
+/* ==================== STUDENT NOTIFICATIONS ==================== */
+router.get("/notifications/:studentId", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { limit } = req.query;
+    const notifications = await Notification.find({ userId: studentId })
+      .sort({ createdAt: -1 })
+      .limit(Math.min(Number(limit) || 50, 200))
+      .lean();
+    res.json({ success: true, notifications });
+  } catch (err) {
+    console.error("Student notifications fetch error:", err);
+    res.status(500).json({ message: "Server error fetching notifications" });
+  }
+});
+
+router.patch("/notifications/:studentId/:id/read", async (req, res) => {
+  try {
+    const { studentId, id } = req.params;
+    const n = await Notification.findOneAndUpdate(
+      { _id: id, userId: studentId, role: "student" },
+      { read: true },
+      { new: true }
+    );
+    if (!n) return res.status(404).json({ message: "Notification not found" });
+    res.json({ success: true, notification: n });
+  } catch (err) {
+    console.error("Mark student notification read error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+router.patch("/notifications/:studentId/read-all", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    await Notification.updateMany({ userId: studentId, role: "student", read: false }, { read: true });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Mark all student notifications read error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+router.get("/notifications/:studentId/unread-count", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const count = await Notification.countDocuments({ userId: studentId, role: "student", read: false });
+    res.json({ success: true, count });
+  } catch (err) {
+    console.error("Student unread count error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+/* ==================== STUDENT NOTIFICATIONS ==================== */
+
+/* ==================== MY TIMETABLE (student) ==================== */
+/**
+ * GET /api/students/:studentId/timetable
+ * This week's classes (Mon–Sun) for every class group the student is enrolled
+ * in — all statuses, so the dashboard calendar shows upcoming, live,
+ * completed AND the dummy test classes (group code DUMMY-…).
+ */
+router.get("/:studentId/timetable", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const groups = await ClassGroup.find({ students: studentId }).select("_id").lean();
+    const groupIds = groups.map((g) => g._id);
+    if (!groupIds.length) return res.json({ success: true, timetable: [] });
+
+    const now = new Date();
+    const monday = new Date(now);
+    monday.setHours(0, 0, 0, 0);
+    monday.setDate(monday.getDate() - ((now.getDay() + 6) % 7));
+    const sunday = new Date(monday);
+    sunday.setDate(sunday.getDate() + 7);
+
+    const sessions = await ClassSession.find({
+      classGroup: { $in: groupIds },
+      date: { $gte: monday, $lt: sunday },
+    })
+      .populate("classGroup", "code subject grade")
+      .populate("teacher", "fullName name")
+      .sort({ date: 1, startTime: 1 })
+      .lean();
+
+    res.json({
+      success: true,
+      timetable: sessions.map((s) => ({
+        id: s._id,
+        date: s.date,
+        startTime: s.startTime,
+        endTime: s.endTime,
+        status: s.status,
+        subject: s.classGroup?.subject || "Class",
+        grade: s.classGroup?.grade || "",
+        groupCode: s.classGroup?.code || "",
+        teacher: s.teacher?.fullName || s.teacher?.name || "Teacher TBA",
+        meetingStatus: s.meetingStatus,
+      })),
+    });
+  } catch (err) {
+    console.error("Student timetable error:", err);
+    res.status(500).json({ success: false, message: "Failed to load timetable" });
+  }
+});
+
+/** GET /api/students/:studentId/notifications */
+router.get("/:studentId/notifications", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { role, limit } = req.query;
+    const notifications = await listForUser({
+      userId: studentId,
+      role: role || "student",
+      limit: Number(limit) || 50,
+    });
+    res.json({ success: true, notifications });
+  } catch (err) {
+    console.error("Student notifications load error:", err);
+    res.status(500).json({ success: false, message: "Failed to load notifications" });
+  }
+});
+
+/** GET /api/students/:studentId/notifications/unread-count */
+router.get("/:studentId/notifications/unread-count", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const count = await unreadCount({ userId: studentId, role: "student" });
+    res.json({ success: true, count });
+  } catch (err) {
+    console.error("Student unread-count error:", err);
+    res.status(500).json({ success: false, message: "Failed to get unread count" });
+  }
+});
+
+/** PATCH /api/students/:studentId/notifications/:id/read */
+router.patch("/:studentId/notifications/:id/read", async (req, res) => {
+  try {
+    const { studentId, id } = req.params;
+    const n = await markRead({ notificationId: id, userId: studentId });
+    res.json({ success: true, notification: n });
+  } catch (err) {
+    res.status(404).json({ success: false, message: err.message });
+  }
+});
+
+/** PATCH /api/students/:studentId/notifications/read-all */
+router.patch("/:studentId/notifications/read-all", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    await markAllRead({ userId: studentId, role: "student" });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Mark all student notifications read error:", err);
+    res.status(500).json({ success: false, message: "Failed to mark all as read" });
+  }
+});
+
+/** DELETE /api/students/:studentId/notifications/:id - dismiss one notification */
+router.delete("/:studentId/notifications/:id", async (req, res) => {
+  try {
+    const { studentId, id } = req.params;
+    await deleteNotification({ notificationId: id, userId: studentId });
+    res.json({ success: true, deleted: id });
+  } catch (err) {
+    res.status(404).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * DELETE /api/students/:studentId/notifications - clear old notifications.
+ * Keeps unread ones by default; pass ?all=true to wipe everything.
+ */
+router.delete("/:studentId/notifications", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const onlyRead = req.query.all !== "true";
+    const result = await clearNotifications({ userId: studentId, role: "student", onlyRead });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("Clear student notifications error:", err);
+    res.status(500).json({ success: false, message: "Failed to clear notifications" });
+  }
+});
 router.get("/broadcasts/:studentId", async (req, res) => {
   try {
     const { studentId } = req.params;

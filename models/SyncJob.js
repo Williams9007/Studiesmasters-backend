@@ -21,6 +21,7 @@ const syncJobSchema = new mongoose.Schema(
         "suspendUser",
         "reactivateUser",
         "assignCourse",
+        "syncClass",
         "reconcile",
         "custom",
       ],

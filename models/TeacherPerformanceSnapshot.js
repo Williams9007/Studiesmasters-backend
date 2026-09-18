@@ -27,6 +27,10 @@ const teacherPerformanceSnapshotSchema = new mongoose.Schema(
       enum: ["underloaded", "balanced", "heavy", "overloaded"],
       default: "balanced",
     },
+    // Tutor Manager / QAO manual mark on the teacher's performance for the month.
+    // Optional: kept separate from the auto-computed metrics above.
+    rating: { type: Number, min: 1, max: 5, default: null },
+    ratingRemark: { type: String, trim: true, default: "" },
     createdAt: { type: Date, default: Date.now },
   },
   { timestamps: true }

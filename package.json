@@ -25,8 +25,9 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "nodemon": "^3.0.0"
-    },
+    "nodemon": "^3.0.0",
+    "socket.io-client": "^4.8.3"
+  },
   "scripts": {
     "backfill:user-ids": "node scripts/backfillUserIds.js",
     "start": "node server.js",
@@ -34,6 +35,9 @@
     "seed": "node seed/seedStudent.js",
     "seed:students": "node seed/seedStudent.js",
     "seed:qao": "node seed/seedTutorManager.js",
-    "test:sso": "node scripts/sso-self-test.js"
+    "test:sso": "node scripts/sso-self-test.js",
+    "test:notify": "node scripts/notify-self-test.js",
+    "test:notify-socket": "node scripts/notify-socket-e2e.js",
+    "seed:dummy-timetable": "node scripts/seed-dummy-timetable-notifications.js"
   }
 }

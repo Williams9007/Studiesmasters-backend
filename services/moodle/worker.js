@@ -13,6 +13,7 @@ import { unenrollUser } from "./unenrollUser.js";
 import { suspendUser } from "./suspendUser.js";
 import { syncProfile } from "./syncProfile.js";
 import { audit } from "./audit.js";
+import { replayQueuedClassSync } from "./syncClass.js";
 import logger from "../../utils/logger.js";
 
 const HANDLERS = {
@@ -24,6 +25,7 @@ const HANDLERS = {
   suspendUser: (p) => suspendUser({ role: p.role || "student", id: p.id, suspended: !!p.suspended }),
   reactivateUser: (p) => suspendUser({ role: p.role || "student", id: p.id, suspended: false }),
   assignCourse: (p) => enrollUser({ role: p.role || "student", id: p.id, courseIds: p.courseIds || [p.courseId] }),
+  syncClass: (p) => replayQueuedClassSync({ sessionId: p.sessionId, action: p.action }),
 };
 
 export async function processQueueBatch({ max = 10 } = {}) {

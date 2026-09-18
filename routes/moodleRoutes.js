@@ -51,6 +51,45 @@ router.get("/sso/verify", async (req, res) => {
   return res.json({ success: true, ...verdict });
 });
 
+// ---- Timetable / live-class sync (stock Moodle calendar events) ------------
+// Students push their week into their own Moodle calendar (so Moodle is the
+// place they access live classes); admins can bulk re-push live classes.
+router.post("/sync/timetable", ssoLimiter, studentAuth, async (req, res) => {
+  try {
+    const { syncTimetableForStudent } = await import("../services/moodle/syncTimetable.js");
+    return ok(res, await syncTimetableForStudent({ studentId: req.user._id, req }));
+  } catch (err) { return fail(res, 502, "Timetable sync failed", { error: err.message }); }
+});
+router.post("/sync/teacher-timetable", ssoLimiter, verifyTeacher, async (req, res) => {
+  try {
+    const { syncTimetableForTeacher } = await import("../services/moodle/syncTimetable.js");
+    return ok(res, await syncTimetableForTeacher({ teacherId: req.user._id, req }));
+  } catch (err) { return fail(res, 502, "Teacher timetable sync failed", { error: err.message }); }
+});
+router.post("/sync/timetable/:studentId", adminLimiter, adminAuth, async (req, res) => {
+  try {
+    const { syncTimetableForStudent } = await import("../services/moodle/syncTimetable.js");
+    return ok(res, await syncTimetableForStudent({
+      studentId: req.params.studentId,
+      from: req.body?.from || null,
+      to: req.body?.to || null,
+      req,
+    }));
+  } catch (err) { return fail(res, 502, "Timetable sync failed", { error: err.message }); }
+});
+router.post("/sync/class-group/:id", adminLimiter, adminAuth, async (req, res) => {
+  try {
+    const { syncClassGroupEnrollment } = await import("../services/moodle/syncTimetable.js");
+    return ok(res, await syncClassGroupEnrollment({ classGroupId: req.params.id, req }));
+  } catch (err) { return fail(res, 502, "Class group sync failed", { error: err.message }); }
+});
+router.post("/sync/live-classes", adminLimiter, adminAuth, async (req, res) => {
+  try {
+    const { syncLiveClasses } = await import("../services/moodle/syncTimetable.js");
+    return ok(res, await syncLiveClasses({ from: req.body?.from || null, to: req.body?.to || null }));
+  } catch (err) { return fail(res, 502, "Live class sync failed", { error: err.message }); }
+});
+
 // ---- Health / availability (read-only, unauthenticated) ------------------
 router.get("/health", async (req, res) => {
   try {
@@ -198,5 +237,220 @@ router.post("/retry-failed", adminLimiter, adminAuth, async (req, res) => {
   try { return ok(res, await retryFailedSyncs()); }
   catch (err) { return fail(res, 500, "Retry failed.", { error: err.message }); }
 });
+// ---- Force a class display-sync to Moodle (manual / remediation) ------------
+// Backend is the single source of truth; this pushes the current ClassSession
+// into a Moodle calendar event ("Join Virtual Class" link embedded), or removes
+// it on cancellation.
+router.post("/class-sync/:sessionId", adminLimiter, adminAuth, async (req, res) => {
+  try {
+    const { replayClassSync, syncClassSession } = await import("../services/moodle/index.js");
+    const ClassSession = (await import("../models/ClassSession.js")).default;
+    const session = await ClassSession.findById(req.params.sessionId)
+      .populate("classGroup", "code subject grade curriculum")
+      .populate("teacher", "fullName")
+      .populate("substituteTeacher", "fullName")
+      .lean();
+    if (!session) return fail(res, 404, "Class session not found");
+    const action = (req.body?.action || (session.status === "cancelled" ? "CLASS_CANCELLED" : "CLASS_MEETING_READY"));
+    const result = await (action === "CLASS_CANCELLED"
+      ? syncClassSession(session, { action, sessionId: session._id })
+      : syncClassSession(session, { action, sessionId: session._id }));
+    return ok(res, { sessionId: session._id, action, synced: result.synced, live: result.live || false, outbox: result.outbox || false, moodleEventId: result.moodleEventId || null, details: result.payload || null });
+  } catch (err) { return fail(res, 500, "Class sync failed.", { error: err.message }); }
+});
 
+// ===========================================================================
+// Virtual Classroom launched FROM MOODLE
+// ---------------------------------------------------------------------------
+// These endpoints are called by the Moodle "studiesmasters_virtualclass" local
+// plugin. Moodle cannot hold a JWT, so each request is an SSO-style signed
+// payload (username|email|timestamp|nonce|course) verified against the shared
+// secret. The signed username resolves to the Mongo principal, and the backend
+// re-applies enrollment/assignment gates before returning any Meet link.
+// All operations reuse the existing scheduling/attendance/notify services.
+// ===========================================================================
+const ssoClassLimiter = rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false });
+
+function readSignedQuery(req) {
+  return {
+    username: req.query.username,
+    email: req.query.email,
+    timestamp: req.query.timestamp,
+    nonce: req.query.nonce,
+    course: req.query.course,
+    signature: req.query.signature,
+    req,
+  };
+}
+
+function verifyOrFail(res, verdict) {
+  if (!verdict.ok) return res.status(401).json({ success: false, reason: verdict.reason });
+  return null;
+}
+
+// List my virtual classes (student or teacher) from Moodle.
+router.get("/vclass/sessions", ssoClassLimiter, async (req, res) => {
+  try {
+    const { verifyClassRequest, listUserSessions } = await import("../services/moodle/classPortal.service.js");
+    const verdict = await verifyClassRequest(readSignedQuery(req));
+    const denied = verifyOrFail(res, verdict);
+    if (denied) return;
+    if (!verdict.principalId) return res.status(401).json({ success: false, reason: "no_principal" });
+    const sessions = await listUserSessions({ role: verdict.role, principalId: verdict.principalId });
+    return res.json({ success: true, role: verdict.role, sessions });
+  } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+});
+
+// Join a class — the ONLY place a student gets the Meet link from Moodle.
+router.post("/vclass/:sessionId/join", ssoClassLimiter, async (req, res) => {
+  try {
+    const { verifyClassRequest, joinSession, leaveSession } = await import("../services/moodle/classPortal.service.js");
+    const verdict = await verifyClassRequest(readSignedQuery(req));
+    const denied = verifyOrFail(res, verdict);
+    if (denied) return;
+    const result = await joinSession({ role: verdict.role, principalId: verdict.principalId, sessionId: req.params.sessionId });
+    if (result.error) return res.status(result.error.status).json(result.error);
+    if (req.query.markLeave === "1") { // compatibility: join + immediate leave not used
+      await leaveSession({ role: verdict.role, principalId: verdict.principalId, sessionId: req.params.sessionId });
+    }
+    return res.json(result);
+  } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+});
+
+// Leave a class from Moodle.
+router.post("/vclass/:sessionId/leave", ssoClassLimiter, async (req, res) => {
+  try {
+    const { verifyClassRequest, leaveSession } = await import("../services/moodle/classPortal.service.js");
+    const verdict = await verifyClassRequest(readSignedQuery(req));
+    const denied = verifyOrFail(res, verdict);
+    if (denied) return;
+    const result = await leaveSession({ role: verdict.role, principalId: verdict.principalId, sessionId: req.params.sessionId, joinedAt: req.query.joinedAt });
+    if (result.error) return res.status(result.error.status).json(result.error);
+    return res.json(result);
+  } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+});
+
+// Teacher: start a class from Moodle.
+router.post("/vclass/:sessionId/start", ssoClassLimiter, async (req, res) => {
+  try {
+    const { verifyClassRequest, startSession } = await import("../services/moodle/classPortal.service.js");
+    const verdict = await verifyClassRequest(readSignedQuery(req));
+    const denied = verifyOrFail(res, verdict);
+    if (denied) return;
+    const result = await startSession({ role: verdict.role, principalId: verdict.principalId, sessionId: req.params.sessionId });
+    if (result.error) return res.status(result.error.status).json(result.error);
+    return res.json(result);
+  } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+});
+
+// Teacher: end a class from Moodle.
+router.post("/vclass/:sessionId/end", ssoClassLimiter, async (req, res) => {
+  try {
+    const { verifyClassRequest, endSessionForMoodle } = await import("../services/moodle/classPortal.service.js");
+    const verdict = await verifyClassRequest(readSignedQuery(req));
+    const denied = verifyOrFail(res, verdict);
+    if (denied) return;
+    const result = await endSessionForMoodle({ role: verdict.role, principalId: verdict.principalId, sessionId: req.params.sessionId });
+    if (result.error) return res.status(result.error.status).json(result.error);
+    return res.json(result);
+  } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+});
+// Unified dashboard (student & teacher) — Phase 7.
+router.get("/vclass/dashboard", ssoClassLimiter, async (req, res) => {
+  try {
+    const { verifyClassRequest, dashboardForUser } = await import("../services/moodle/classPortal.service.js");
+    const v = await verifyClassRequest(readSignedQuery(req));
+    const denied = verifyOrFail(res, v);
+    if (denied) return;
+    const dashboard = await dashboardForUser({ role: v.role, principalId: v.principalId });
+    return res.json({ success: true, ...dashboard });
+  } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+});
+
+// Attendance history (student = own; teacher = roster).
+router.get("/vclass/attendance", ssoClassLimiter, async (req, res) => {
+  try {
+    const { verifyClassRequest, attendanceHistoryForUser } = await import("../services/moodle/classPortal.service.js");
+    const v = await verifyClassRequest(readSignedQuery(req));
+    const denied = verifyOrFail(res, v);
+    if (denied) return;
+    const data = await attendanceHistoryForUser({ role: v.role, principalId: v.principalId });
+    return ok(res, data);
+  } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+});
+
+// Recording library.
+router.get("/vclass/recordings", ssoClassLimiter, async (req, res) => {
+  try {
+    const { verifyClassRequest, recordingHistoryForUser } = await import("../services/moodle/classPortal.service.js");
+    const v = await verifyClassRequest(readSignedQuery(req));
+    const denied = verifyOrFail(res, v);
+    if (denied) return;
+    const rows = await recordingHistoryForUser({ role: v.role, principalId: v.principalId });
+    return ok(res, { recordings: rows });
+  } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+});
+
+// Recent notifications.
+router.get("/vclass/notifications", ssoClassLimiter, async (req, res) => {
+  try {
+    const { verifyClassRequest, notificationsForUser } = await import("../services/moodle/classPortal.service.js");
+    const v = await verifyClassRequest(readSignedQuery(req));
+    const denied = verifyOrFail(res, v);
+    if (denied) return;
+    const rows = await notificationsForUser({ role: v.role, principalId: v.principalId, limit: req.query.limit });
+    return ok(res, { notifications: rows });
+  } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+});
+
+// Teacher regenerates the meeting.
+router.post("/vclass/:sessionId/regenerate", ssoClassLimiter, async (req, res) => {
+  try {
+    const { verifyClassRequest, regenerateSession } = await import("../services/moodle/classPortal.service.js");
+    const v = await verifyClassRequest(readSignedQuery(req));
+    const denied = verifyOrFail(res, v);
+    if (denied) return;
+    const result = await regenerateSession({ role: v.role, principalId: v.principalId, sessionId: req.params.sessionId });
+    if (result.error) return res.status(result.error.status).json(result.error);
+    return ok(res, result);
+  } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+});
+
+// Download attendance CSV (teacher).
+router.get("/vclass/attendance/:sessionId/export", ssoClassLimiter, async (req, res) => {
+  try {
+    const { verifyClassRequest } = await import("../services/moodle/classPortal.service.js");
+    const v = await verifyClassRequest(readSignedQuery(req));
+    const denied = verifyOrFail(res, v);
+    if (denied) return;
+    const ClassSession = (await import("../models/ClassSession.js")).default;
+    const Student = (await import("../models/Student.js")).default;
+    const session = await ClassSession.findById(req.params.sessionId)
+      .populate("classGroup", "code subject grade curriculum")
+      .lean();
+    if (!session) return fail(res, 404, "Session not found");
+    const isTeacher =
+      String(session.teacher || "") === String(v.principalId) ||
+      String(session.substituteTeacher || "") === String(v.principalId);
+    if (!isTeacher) return fail(res, 403, "Only the assigned teacher can export this attendance");
+    // Resolve student ids -> names (PII is intentional here: it's the class roster
+    // the teacher legitimately needs; it is NOT exposed anywhere else).
+    const ids = (session.attendance || []).map((a) => a.student);
+    const students = await Student.find({ _id: { $in: ids } }).select("fullName email").lean();
+    const byId = Object.fromEntries(students.map((s) => [String(s._id), s]));
+    const rows = (session.attendance || []).map((a) => ({
+      Name: byId[String(a.student)]?.fullName || "—",
+      Email: byId[String(a.student)]?.email || "",
+      JoinedAt: a.joinedAt ? new Date(a.joinedAt).toLocaleString() : "",
+      LeftAt: a.leftAt ? new Date(a.leftAt).toLocaleString() : "",
+      DurationMin: a.duration || 0,
+    }));
+    const { toCsv, csvBuffer } = await import("../services/qao/export.service.js");
+    const headers = ["Name", "Email", "JoinedAt", "LeftAt", "DurationMin"];
+    const csv = toCsv(headers, rows);
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="attendance-${session._id}.csv"`);
+    return res.send(csvBuffer(csv));
+  } catch (err) { return res.status(500).json({ success: false, message: err.message }); }
+});
 export default router;

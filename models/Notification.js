@@ -1,7 +1,9 @@
 import mongoose from "mongoose";
 
 const notificationSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  // Optional: role-wide broadcasts (notifyAllTeachers / notifyAllQaos) have no
+  // single recipient and store userId = null (they are queried by role).
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
   // Role of the recipient - allows querying by role and scoping payloads.
   role: { type: String, enum: ["qao", "teacher", "student", "admin"], default: "teacher" },
   title: { type: String, trim: true, default: "" },

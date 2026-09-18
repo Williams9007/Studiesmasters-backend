@@ -22,13 +22,35 @@ export function emitToStudent(studentId, event, payload = {}) {
 }
 
 // Emit to many students' private rooms.
-export function emitToStudents(studentIds, event, payload = {}) {
+export function emitToStudents(studentIds, event, payloadOrMapper = {}) {
   if (!io || !Array.isArray(studentIds)) return;
-  for (const id of studentIds) if (id) io.to(`student:${id}`).emit(event, payload);
+  for (const id of studentIds) {
+    if (id) {
+      let payload;
+      if (typeof payloadOrMapper === "function") {
+        payload = payloadOrMapper(id);
+      } else {
+        payload = payloadOrMapper;
+      }
+      io.to(`student:${id}`).emit(event, payload);
+    }
+  }
 }
 
-// Emit to a specific admin's room (admin:{id}). A shared "admins" broadcast
-// room is intentionally NOT used because the platform forbids global broadcasts.
-export function emitToAdmin(adminId, event, payload = {}) {
+// Emit to all connected teachers via the "teachers" broadcast room.
+// Note: this only reaches *currently connected* sockets — use notifyTeacher()
+// in a loop (with the Notification model) for durable, offline-capable delivery.
+export function emitToAllTeachers(event, payload = {}) {
+  if (io) io.to("teachers").emit(event, payload);
+}
+
+// Emit to the shared admin room ("admins") — every connected admin dashboard
+// joins it (server.js auto-joins on connect when role=admin, or via "admin-join").
+export function emitToAdmin(event, payload = {}) {
+  if (io) io.to("admins").emit(event, payload);
+}
+
+// Emit to one admin's private room (admin:{id}).
+export function emitToAdmins(adminId, event, payload = {}) {
   if (io && adminId) io.to(`admin:${adminId}`).emit(event, payload);
 }

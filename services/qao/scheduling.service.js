@@ -5,6 +5,8 @@ import { emitToQaos, emitToTeacher, emitToStudents, emitToAdmin } from "./notify
 import { logQaoAction } from "./audit.service.js";
 import { createMeeting } from "../google/meet.service.js";
 import { syncClassSession, CLASS_SYNC_ACTIONS } from "../moodle/syncClass.js";
+import { notifyTeacher, notifyStudents } from "./notification.service.js";
+import { sendPushToAll } from "../../Controllers/pushNotificationController.js";
 
 const SAFE_TEACHER_FIELDS = "fullName email employeeRole employmentStatus photo";
 const SAFE_GROUP_FIELDS = "code curriculum grade subject capacity status schedule meetingLink";
@@ -123,15 +125,15 @@ export async function createSession(data = {}) {
   emitToQaos(session.meetingStatus === "ready" ? "meeting:generated" : "meeting:failed", { sessionId: session._id, meetingStatus: session.meetingStatus });
   emitToAdmin("meeting:updated", { sessionId: session._id, meetingStatus: session.meetingStatus });
 
-  // ---- Enrolled students get the class:created notification (role rooms) ---
+  // ---- Enrolled students for this class group --------------------------------
   const groupDoc = await ClassGroup.findById(classGroup).select("students").lean();
   const studentIds = groupDoc?.students || [];
-  emitToStudents(studentIds, "class:created", {
-    sessionId: session._id,
-    classGroup: group.code,
-    date: session.date,
-    meetingLink: session.meetingLink,
-  });
+
+  // Bulk generation (generateRangeSessions) passes { quiet: true } so one
+  // session out of dozens does NOT each write durable notifications, socket
+  // events and push broadcasts. The single summary in publishTimetable()
+  // covers the whole batch instead.
+  const quiet = data.quiet === true || data.skipNotify === true || data.bulk === true;
 
   // ---- Moodle display sync (backend still the source of truth) -------------
   try {
@@ -142,7 +144,63 @@ export async function createSession(data = {}) {
 
   emitToQaos("schedule:created", { sessionId: session._id, classGroup: group.code, date: session.date });
   emitToQaos("class:upcoming", { sessionId: session._id, classGroup: group.code, date: session.date });
-  emitToTeacher(teacher, "class:upcoming", { sessionId: session._id, classGroup: group.code, date: session.date });
+
+  if (!quiet) {
+    // Single-session creation (QAO/Admin "schedule one class" flow):
+    // realtime leg — the matching durable documents follow below.
+    emitToStudents(studentIds, "class:created", {
+      sessionId: session._id,
+      classGroup: group.code,
+      date: session.date,
+      meetingLink: session.meetingLink,
+    });
+    emitToTeacher(teacher, "class:upcoming", { sessionId: session._id, classGroup: group.code, date: session.date });
+
+    // ─── Web-push for the session-based timetable flow ────────────────────
+    // Single-session creates (QAO/Admin "schedule one class" flow) still need
+    // a fan-out so the teacher + students are notified of THIS class.
+    // publishTimetable() sends the one summary push/email per recipient for
+    // batch generation instead. Best-effort: never block scheduling.
+    try {
+      const push = await import("../../Controllers/pushNotificationController.js");
+      const when = new Date(session.date).toLocaleDateString();
+      const pushTitle = "New Class Scheduled";
+      const pushBody = `${group.subject || "Class"}${group.grade ? ` (${group.grade})` : ""} on ${when} at ${session.startTime}–${session.endTime}`;
+      if (typeof push.sendPushToTeacher === "function") {
+        await push.sendPushToTeacher(teacher, pushTitle, pushBody, "/dashboard").catch(() => {});
+      }
+      if (Array.isArray(studentIds) && studentIds.length && typeof push.sendPushToStudents === "function") {
+        await push.sendPushToStudents(studentIds, pushTitle, pushBody, "/dashboard").catch(() => {});
+      }
+    } catch { /* push is best-effort; never block scheduling */ }
+
+    // Keep the legacy broadcast for any external subscribers that still listen.
+    if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+      try {
+        const pushTitle = "New Class Scheduled";
+        const pushBody = `${group.subject || "Class"}${group.grade ? ` (${group.grade})` : ""} on ${new Date(session.date).toLocaleDateString()}`;
+        await sendPushToAll(pushTitle, pushBody, "/dashboard").catch(() => {});
+      } catch { /* push is best-effort; never block scheduling */ }
+    }
+
+    // ─── Durable notifications for timetable creation ─────────────────────────
+    // Teacher gets a persistent notification + socket event.
+    await notifyTeacher({
+      teacherId: teacher,
+      title: "New Class Scheduled",
+      message: `${group.subject || "Class"}${group.grade ? ` (${group.grade})` : ""} on ${new Date(session.date).toLocaleDateString()}`,
+      type: "info",
+    }).catch(() => {});
+
+    // All enrolled students get a persistent notification + socket event.
+    await notifyStudents({
+      studentIds,
+      title: "New Class Added to Your Timetable",
+      message: `${group.subject || "Class"}${group.grade ? ` (${group.grade})` : ""} on ${new Date(session.date).toLocaleDateString()} at ${session.startTime}–${session.endTime}`,
+      type: "info",
+    }).catch(() => {});
+  }
+
   await logQaoAction({
     action: "SESSION_CREATED",
     resource: "ClassSession",
@@ -532,7 +590,7 @@ export async function endSession(id, { actor = null, forced = false } = {}) {
   emitToTeacher(session.substituteTeacher || session.teacher, "class:ended", payload);
   emitToAdmin("class:ended", payload);
   try {
-    const Group = (await import("../ClassGroup.js" )).default;
+    const Group = (await import("../../models/ClassGroup.js")).default;
     const g = await Group.findById(session.classGroup).select("students").lean();
     emitToStudents(g?.students || [], "class:ended", payload);
   } catch { /* non-fatal */ }

@@ -20,6 +20,17 @@ const classGroupSchema = new mongoose.Schema({
     startTime: { type: String, trim: true, default: "" },
     endTime: { type: String, trim: true, default: "" },
   },
+// Recurring weekly timetable: a class can meet MULTIPLE times per week
+  // (e.g. Mon 09:00 + Wed 11:00). Each slot is a recurring day/time block that
+  // the scheduler expands into concrete ClassSessions over a chosen term range.
+  // Kept separate from the singular legacy `schedule` for backward compatibility.
+  weeklySlots: [
+    {
+      day: { type: String, trim: true, default: "" },     // "Monday"..."Sunday"
+      startTime: { type: String, trim: true, default: "" }, // "09:00"
+      endTime: { type: String, trim: true, default: "" },   // "10:00"
+    },
+  ],
   meetingLink: { type: String, trim: true, default: "" },
 }, { timestamps: true });
 

@@ -98,13 +98,22 @@ export async function generateSnapshot({ month = monthKey(), computeAvailability
     const workloadScore =
       teachingHours >= 30 ? 80 : teachingHours >= 20 ? 60 : teachingHours >= 10 ? 40 : 20;
 
+    // Keep any manual QAO rating/remark the snapshot already carries; never
+    // overwrite it on regeneration ($setOnInsert only sets it on first creation).
+    const { rating: existingRating, ratingRemark: existingRemark } =
+      (await TeacherPerformanceSnapshot.findOne({ teacher: teacher._id, month })
+        .select("rating ratingRemark")
+        .lean()) || {};
     const snapshot = await TeacherPerformanceSnapshot.findOneAndUpdate(
       { teacher: teacher._id, month },
       {
-        ...metrics,
-        availabilityRate: availRate,
-        workloadScore,
-        workloadLevel: workloadLevelFor(teachingHours),
+        $set: {
+          ...metrics,
+          availabilityRate: availRate,
+          workloadScore,
+          workloadLevel: workloadLevelFor(teachingHours),
+        },
+        $setOnInsert: { rating: existingRating ?? null, ratingRemark: existingRemark || "" },
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     ).lean();
@@ -116,6 +125,8 @@ export async function generateSnapshot({ month = monthKey(), computeAvailability
       availabilityRate: availRate,
       workloadScore,
       workloadLevel: workloadLevelFor(teachingHours),
+      rating: existingRating ?? snapshot.rating ?? null,
+      ratingRemark: (existingRemark ?? snapshot.ratingRemark) || "",
       snapshotId: snapshot._id,
     });
   }
@@ -133,6 +144,9 @@ export async function getMonthlyStatistics({ month = monthKey(), teacherId = nul
   for (const teacher of teachers) {
     const metrics = await computeTeacher(teacher._id, { start, end });
     const teachingHours = metrics.teachingHours;
+    const snap = await TeacherPerformanceSnapshot.findOne({ teacher: teacher._id, month })
+      .select("rating ratingRemark")
+      .lean();
     rows.push({
       teacherId: teacher._id,
       name: teacher.fullName || teacher.name || "Teacher",
@@ -140,6 +154,8 @@ export async function getMonthlyStatistics({ month = monthKey(), teacherId = nul
       ...metrics,
       workloadLevel: workloadLevelFor(teachingHours),
       workloadScore: teachingHours >= 30 ? 80 : teachingHours >= 20 ? 60 : teachingHours >= 10 ? 40 : 20,
+      rating: snap?.rating ?? null,
+      ratingRemark: snap?.ratingRemark || "",
     });
   }
   rows.sort((a, b) => b.teachingHours - a.teachingHours);
@@ -159,4 +175,45 @@ export async function listSnapshots({ teacherId = null, limit = 12 } = {}) {
     .sort({ month: -1 })
     .limit(Math.min(Number(limit) || 12, 60))
     .lean();
+}
+
+// Mark a teacher's performance for a month (manual Tutor Manager / QAO rating).
+// Upserts onto the per-teacher-per-month snapshot without touching the
+// auto-computed metrics. `rating` is an optional integer 1-5; 0/null/" clears it.
+export async function saveRating({ teacherId, month = monthKey(), rating = null, remark = "" }) {
+  if (!teacherId) throw new Error("teacherId is required");
+  const value = rating === null || rating === undefined || rating === ""
+    ? null
+    : Number(rating);
+  const cleanRemark = String(remark || "").trim();
+
+  if (value !== null && (!Number.isInteger(value) || value < 1 || value > 5)) {
+    throw new Error("Rating must be an integer from 1 to 5, or empty to clear");
+  }
+
+  const snapshot = await TeacherPerformanceSnapshot.findOneAndUpdate(
+    { teacher: teacherId, month },
+    {
+      $set: { rating: value, ratingRemark: cleanRemark },
+      $setOnInsert: {
+        completedClasses: 0,
+        cancelledClasses: 0,
+        substitutedClasses: 0,
+        teachingHours: 0,
+        cancellationRate: 0,
+        availabilityRate: 100,
+        workloadScore: 0,
+        workloadLevel: "balanced",
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  ).lean();
+
+  return {
+    month,
+    teacherId,
+    rating: value,
+    remark: cleanRemark,
+    snapshotId: snapshot._id,
+  };
 }

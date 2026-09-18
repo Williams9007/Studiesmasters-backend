@@ -14,6 +14,9 @@ import Broadcast from "../models/Broadcast.js";
 import ClassEnrollment from "../models/ClassEnrollment.js";
 import TeacherAssignment from "../models/TeacherAssignment.js";
 import ClassGroup from "../models/ClassGroup.js";
+import Notification from "../models/Notification.js";
+import ClassSession from "../models/ClassSession.js";
+import Timetable from "../models/Timetable.js";
 // Middleware
 import { verifyTurnstile } from "../middleware/verifyTurnstile.js";
 import { createPasswordResetToken, hashPasswordResetToken, sendPasswordResetEmail } from "../utils/passwordReset.js";
@@ -441,6 +444,334 @@ router.get("/:id/students", async (req, res) => {
   } catch (err) {
     console.error("Error fetching teacher students:", err);
     res.status(500).json({ message: "Server error fetching students" });
+  }
+});
+
+// ─── MY TIMETABLE (teacher) ──────────────────────────────────────────────────
+/**
+ * GET /api/teachers/:id/timetable
+ * This week's classes (Mon–Sun) where the teacher is the main teacher OR the
+ * substitute — all statuses, so the dashboard calendar shows the full week
+ * including the dummy test classes (group code DUMMY-…).
+ */
+router.get("/:id/timetable", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const now = new Date();
+    const monday = new Date(now);
+    monday.setHours(0, 0, 0, 0);
+    monday.setDate(monday.getDate() - ((now.getDay() + 6) % 7));
+    const sunday = new Date(monday);
+    sunday.setDate(sunday.getDate() + 7);
+
+    const sessions = await ClassSession.find({
+      $or: [{ teacher: id }, { substituteTeacher: id }],
+      date: { $gte: monday, $lt: sunday },
+    })
+      .populate("classGroup", "code subject grade")
+      .populate("substituteTeacher", "_id")
+      .sort({ date: 1, startTime: 1 })
+      .lean();
+
+    res.json({
+      success: true,
+      timetable: sessions.map((s) => {
+        const subId = s.substituteTeacher?._id || s.substituteTeacher;
+        return {
+          id: s._id,
+          date: s.date,
+          startTime: s.startTime,
+          endTime: s.endTime,
+          status: s.status,
+          subject: s.classGroup?.subject || "Class",
+          grade: s.classGroup?.grade || "",
+          groupCode: s.classGroup?.code || "",
+          isSubstitute: Boolean(subId && String(subId) === String(id)),
+          meetingStatus: s.meetingStatus,
+        };
+      }),
+    });
+  } catch (err) {
+    console.error("Teacher timetable error:", err);
+    res.status(500).json({ success: false, message: "Failed to load timetable" });
+  }
+});
+
+// ── TIMETABLE SUBMISSION (teacher uploads, Tutor Manager reviews) ───────────
+/**
+ * GET /api/teachers/:id/timetables
+ * The teacher's own uploaded-timetable records + review status, so the
+ * dashboard can show "Pending / Approved / Flagged" and any QAO feedback.
+ */
+router.get("/:id/timetables", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const records = await Timetable.find({ teacherId: id })
+      .populate("subjectId", "name curriculum grade")
+      .sort({ uploadedAt: -1 })
+      .lean();
+    res.json({
+      success: true,
+      timetables: records.map((t) => ({
+        id: t._id,
+        subject: t.subjectId?.name || "",
+        curriculum: t.subjectId?.curriculum || "",
+        classLevel: t.classLevel || "",
+        fileUrl: t.fileUrl || "",
+        status: t.status || "Pending",
+        feedback: t.feedback || "",
+        uploadedAt: t.uploadedAt,
+      })),
+    });
+  } catch (err) {
+    console.error("Teacher timetable records error:", err);
+    res.status(500).json({ success: false, message: "Failed to load timetable records" });
+  }
+});
+
+/**
+ * POST /api/teachers/:id/timetables
+ * Teacher feeds in a timetable (file URL + subject + class level). The record is
+ * created as "Pending" and the Tutor Managers are notified immediately
+ * (durable notification + socket event + web push) so nothing sits unreviewed.
+ *
+ * Body: { subjectId, classLevel, fileUrl }
+ */
+router.post("/:id/timetables", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { subjectId, classLevel, fileUrl } = req.body || {};
+
+    if (!subjectId) return res.status(400).json({ success: false, message: "subjectId is required" });
+    if (!fileUrl) return res.status(400).json({ success: false, message: "fileUrl is required" });
+
+    const [teacherDoc, subjectDoc] = await Promise.all([
+      Teacher.findById(id).select("fullName name email").lean(),
+      Subject.findById(subjectId).select("name curriculum grade").lean(),
+    ]);
+    if (!teacherDoc) return res.status(404).json({ success: false, message: "Teacher not found" });
+    if (!subjectDoc) return res.status(404).json({ success: false, message: "Subject not found" });
+
+    const record = await Timetable.create({
+      teacherId: id,
+      subjectId,
+      classLevel: classLevel || "",
+      fileUrl,
+      status: "Pending",
+    });
+
+    const teacherName = teacherDoc.fullName || teacherDoc.name || "A teacher";
+    const scope = `${subjectDoc.name || "Timetable"}${classLevel ? ` (${classLevel})` : ""}`;
+
+    // Tutor Manager notification centre: durable record + realtime event.
+    try {
+      await notifyAllQaos({
+        title: "Timetable submitted for review",
+        message: `${teacherName} submitted a timetable for ${scope}. Review it in Timetable Approvals.`,
+        type: "info",
+        emitEvent: "timetable:submitted",
+      });
+      emitToQaos("timetable:submitted", { timetableId: record._id, teacher: teacherName, subject: subjectDoc.name || "" });
+    } catch { /* a notification failure must never lose the submission */ }
+
+    // Best-effort web push to subscribed Tutor Managers.
+    try {
+      // The project is referenced with inconsistent casing by the TypeScript compiler.
+      // @ts-ignore TS1149: preserve the runtime import path while suppressing the casing diagnostic.
+      const push = await import("../Controllers/pushNotificationController.js");
+      if (typeof push.sendPushToQaos === "function") {
+        await push
+          .sendPushToQaos("Timetable submitted for review", `${teacherName}: ${scope}`, "/qao/dashboard")
+          .catch(() => {});
+      }
+    } catch { /* push is best-effort */ }
+
+    // Confirm the submission back to the teacher (durable + socket).
+    try {
+      await notifyTeacher({
+        teacherId: id,
+        title: "Timetable submitted",
+        message: `Your ${scope} timetable was submitted and is awaiting Tutor Manager review.`,
+        type: "info",
+      });
+      emitToTeacher(id, "timetable:submitted", { timetableId: record._id, status: "Pending" });
+    } catch { /* non-fatal */ }
+
+    res.status(201).json({
+      success: true,
+      timetable: {
+        id: record._id,
+        subject: subjectDoc.name || "",
+        classLevel: record.classLevel,
+        fileUrl: record.fileUrl,
+        status: record.status,
+        uploadedAt: record.uploadedAt,
+      },
+    });
+  } catch (err) {
+    console.error("Teacher timetable submit error:", err);
+    res.status(400).json({ success: false, message: err.message });
+  }
+});
+
+// ─── CLASS RECORDS (attendance + performance) ────────────────────────────────
+/**
+ * GET /api/teachers/:id/performance
+ * Per-student attendance record across the teacher's class groups, computed
+ * from ClassSession.attendance — which is fed by BOTH the main website
+ * (/api/meet/join|leave) AND the Moodle virtual classroom (/api/moodle/vclass/*),
+ * so this is the single merged record regardless of where the class was
+ * attended or taught.
+ */
+router.get("/:id/performance", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const groups = await ClassGroup.find({ teacher: id }).populate("students", "fullName").lean();
+    const groupIds = groups.map((g) => g._id);
+    if (!groupIds.length) return res.json({ success: true, performance: [] });
+
+    const sessions = await ClassSession.find({
+      classGroup: { $in: groupIds },
+      status: { $in: ["completed", "live"] },
+    })
+      .select("classGroup attendance status date startTime")
+      .sort({ date: -1 })
+      .lean();
+
+    const byGroup = new Map();
+    for (const s of sessions) {
+      const key = String(s.classGroup);
+      if (!byGroup.has(key)) byGroup.set(key, []);
+      byGroup.get(key).push(s);
+    }
+
+    const performance = [];
+    for (const g of groups) {
+      const groupSessions = byGroup.get(String(g._id)) || [];
+      const total = groupSessions.length;
+      for (const st of g.students || []) {
+        let attended = 0;
+        let minutes = 0;
+        let last = null;
+        for (const s of groupSessions) {
+          const rec = (s.attendance || []).find((a) => String(a.student) === String(st._id));
+          if (rec) {
+            attended += 1;
+            minutes += rec.duration || 0;
+            const at = rec.joinedAt || s.date;
+            if (!last || new Date(at) > new Date(last)) last = at;
+          }
+        }
+        performance.push({
+          studentId: st._id,
+          name: st.fullName || "Student",
+          classGroup: g.code,
+          subject: g.subject,
+          totalSessions: total,
+          attended,
+          attendancePct: total ? Math.round((attended / total) * 100) : 0,
+          minutes,
+          lastAttended: last,
+        });
+      }
+    }
+    performance.sort((a, b) => b.attendancePct - a.attendancePct || a.name.localeCompare(b.name));
+    res.json({ success: true, performance });
+  } catch (err) {
+    console.error("Teacher performance error:", err);
+    res.status(500).json({ success: false, message: "Failed to load class records" });
+  }
+});
+
+// ─── TEACHER NOTIFICATIONS ────────────────────────────────────────────────────
+// Uses the shared notification.service.js so every teacher notification is
+// durable (Notification doc) + emitted via socket (notification:new) + ready
+// for push integration.
+
+import {
+  notifyTeacher,
+  notifyAllQaos,
+  listForUser,
+  markRead,
+  markAllRead,
+  unreadCount,
+  deleteNotification,
+  clearNotifications,
+} from "../services/qao/notification.service.js";
+import { emitToTeacher, emitToQaos } from "../services/qao/notify.js";
+
+router.get("/:id/notifications", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { limit } = req.query;
+    const notifications = await listForUser({
+      userId: id,
+      role: "teacher",
+      limit: Number(limit) || 50,
+    });
+    res.json({ success: true, notifications });
+  } catch (err) {
+    console.error("Teacher notifications fetch error:", err);
+    res.status(500).json({ message: "Server error fetching notifications" });
+  }
+});
+
+router.patch("/:id/notifications/:notifId/read", async (req, res) => {
+  try {
+    const { id, notifId } = req.params;
+    const n = await markRead({ notificationId: notifId, userId: id });
+    res.json({ success: true, notification: n });
+  } catch (err) {
+    res.status(404).json({ success: false, message: err.message });
+  }
+});
+
+router.patch("/:id/notifications/read-all", async (req, res) => {
+  try {
+    const { id } = req.params;
+    await markAllRead({ userId: id, role: "teacher" });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Mark all teacher notifications read error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+router.get("/:id/notifications/unread-count", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const count = await unreadCount({ userId: id, role: "teacher" });
+    res.json({ success: true, count });
+  } catch (err) {
+    console.error("Teacher unread count error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+/** DELETE /api/teachers/:id/notifications/:notifId - dismiss one notification */
+router.delete("/:id/notifications/:notifId", async (req, res) => {
+  try {
+    const { id, notifId } = req.params;
+    await deleteNotification({ notificationId: notifId, userId: id });
+    res.json({ success: true, deleted: notifId });
+  } catch (err) {
+    res.status(404).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * DELETE /api/teachers/:id/notifications - clear old notifications.
+ * Default keeps unread ones; pass ?all=true to wipe everything.
+ */
+router.delete("/:id/notifications", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const onlyRead = req.query.all !== "true";
+    const result = await clearNotifications({ userId: id, role: "teacher", onlyRead });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("Clear teacher notifications error:", err);
+    res.status(500).json({ success: false, message: "Failed to clear notifications" });
   }
 });
 

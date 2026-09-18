@@ -21,8 +21,10 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// Apply limiter to auth routes
-router.use(authLimiter);
+// NOTE: apply the limiter PER AUTH ENDPOINT (below) — NOT with router.use().
+// This router is mounted at /api/students AND /api/teachers, so a router-wide
+// limiter would count and 429 every student/teacher dashboard request
+// (/timetable, /notifications, mark-read...) after just 5 requests per 15 min.
 
 // ✅ Create reusable Nodemailer transporter
 const transporter = nodemailer.createTransport({
@@ -40,7 +42,7 @@ const transporter = nodemailer.createTransport({
 });
 
 // ==================== / FORGOT PASSWORD
-router.post("/forget-password", async (req, res) => {
+router.post("/forget-password", authLimiter, async (req, res) => {
   try {
     const { email } = req.body;
 
@@ -92,7 +94,7 @@ router.post("/forget-password", async (req, res) => {
 });
 
 // ==================== / RESET PASSWORD
-router.post("/reset-password/:token", async (req, res) => {
+router.post("/reset-password/:token", authLimiter, async (req, res) => {
   try {
     const { token } = req.params;
     const { newPassword } = req.body;
@@ -123,7 +125,7 @@ router.post("/reset-password/:token", async (req, res) => {
 });
 
 // ==================== / CHANGE PASSWORD (logged in)
-router.post("/change-password", async (req, res) => {
+router.post("/change-password", authLimiter, async (req, res) => {
   try {
     const { userId, currentPassword, newPassword } = req.body;
 

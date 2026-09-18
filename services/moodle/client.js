@@ -189,6 +189,51 @@ export const client = {
     } catch { /* give up */ }
     return [];
   },
+  // ---- Calendar events (core_calendar_create_calendar_events) ---------------
+  // Moodle 4.5.13 web service contract:
+  //   - event title is the "name" field, NOT "title".
+  //   - description must be a plain text string (NOT a JSON object/encoded string).
+  //   - params must be repeated form-encoded keys: events[0][field], NOT a JSON
+  //     array in a query param (that was the "parameter validation failed" cause).
+  //   - drop fields this version rejects: visible, format, timeduration, repeats,
+  //     repeatsfor, groupid, categoryid, subgroup are either rejected or unnecessary
+  //     when startdate + enddate are provided.
+  createEvents(events) {
+    const p = {};
+    (events || []).forEach((ev, i) => {
+      p[`events[${i}][name]`] = ev.name || ev.title || "";
+      // Plain text description — never JSON.stringify an object here.
+      const desc = typeof ev.description === "string"
+        ? ev.description
+        : String(ev.description ?? "");
+      p[`events[${i}][description]`] = desc;
+      if (ev.descriptionformat != null && String(ev.descriptionformat) !== "0") {
+        p[`events[${i}][descriptionformat]`] = ev.descriptionformat;
+      }
+      if (ev.courseid != null) p[`events[${i}][courseid]`] = ev.courseid;
+      if (ev.timestart != null) p[`events[${i}][timestart]`] = String(ev.timestart).split(".")[0];
+      if (ev.timeduration != null) p[`events[${i}][timeduration]`] = ev.timeduration;
+      if (ev.repeats != null && ev.repeats !== 0) p[`events[${i}][repeats]`] = ev.repeats;
+      if (ev.repeatsfor != null && ev.repeatsfor !== 0) p[`events[${i}][repeatsfor]`] = ev.repeatsfor;
+      if (ev.groupid != null && ev.groupid !== 0) p[`events[${i}][groupid]`] = ev.groupid;
+      if (ev.categoryid != null && ev.categoryid !== 0) p[`events[${i}][categoryid]`] = ev.categoryid;
+      if (ev.subgroup != null && ev.subgroup !== "") p[`events[${i}][subgroup]`] = ev.subgroup;
+    });
+    return callWs("core_calendar_create_calendar_events", p);
+  },
+  async updateEvents(events) {
+    const p = {};
+    (events || []).forEach((ev, i) => {
+      const id = ev.id != null ? ev.id : ev.eventid;
+      p[`events[${i}][id]`] = id;
+      if (ev.name != null) p[`events[${i}][name]`] = ev.name;
+      if (ev.description != null) p[`events[${i}][description]`] = ev.description;
+      if (ev.descriptionformat != null) p[`events[${i}][descriptionformat]`] = ev.descriptionformat;
+      if (ev.timestart != null) p[`events[${i}][timestart]`] = String(ev.timestart).split(".")[0];
+      if (ev.timeduration != null) p[`events[${i}][timeduration]`] = ev.timeduration;
+    });
+    return callWs("core_calendar_update_calendar_events", p);
+  },
   // ---- Category / course provisioning (idempotent via idnumber) -----------
   async getCategories(idnumbers) {
     // Fetch ALL categories and filter client-side on idnumber — Moodle's WS

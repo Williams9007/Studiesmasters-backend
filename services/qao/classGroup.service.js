@@ -6,6 +6,24 @@ import { emitToQaos } from "./notify.js";
 // Capacity stays restricted to the package-aligned values used by the
 // auto-grouping algorithm (services/classGroupService.js).
 const CAPACITIES = [1, 5, 10];
+const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+// Validates & normalizes a weekly timetable (array of { day, startTime, endTime }).
+// Used by create/update and by the recurring-schedule feature (timetable.service.js).
+export function normalizeWeeklySlots(slots) {
+  if (slots === undefined || slots === null) return undefined;
+  if (!Array.isArray(slots)) throw new Error("weeklySlots must be an array");
+  return slots
+    .filter((s) => s && (s.day || s.startTime || s.endTime))
+    .map((s) => {
+      const day = String(s.day || "").trim();
+      if (!DAYS.includes(day)) throw new Error(`weeklySlots day must be one of ${DAYS.join(", ")}`);
+      const startTime = String(s.startTime || "").trim();
+      const endTime = String(s.endTime || "").trim();
+      if (!startTime || !endTime) throw new Error("weeklySlots startTime and endTime are required");
+      return { day, startTime, endTime };
+    });
+}
 
 export async function listClassGroups(filter = {}) {
   const groups = await ClassGroup.find(filter)
@@ -51,6 +69,7 @@ export async function createClassGroup(data = {}) {
     },
     meetingLink: meetingLink || "",
     status: "active",
+weeklySlots: normalizeWeeklySlots(data.weeklySlots) || [],
   });
 
   if (!group.teacher) emitToQaos("group:unassigned", { groupId: group._id, code: group.code });
@@ -86,6 +105,9 @@ export async function updateClassGroup(id, updates = {}) {
       if (!teacher) throw new Error("Teacher not found");
       group.teacher = updates.teacher;
     }
+  }
+if (updates.weeklySlots !== undefined) {
+    group.weeklySlots = normalizeWeeklySlots(updates.weeklySlots) || [];
   }
   await group.save();
 

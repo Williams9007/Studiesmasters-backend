@@ -28,7 +28,52 @@ const classSessionSchema = new mongoose.Schema(
     conferenceId: { type: String, trim: true, default: "" },
     // Identifier of the Google Calendar event backing the meeting.
     calendarEventId: { type: String, trim: true, default: "" },
+    // Legacy field - kept for backward compatibility during migration.
+    // New code should use the `recording` object below.
     recordingLink: { type: String, trim: true, default: "" },
+    // ---- Recording Lifecycle (Google Drive) ----
+    // Stores recording metadata when Google Meet recording is processed.
+    recording: {
+      status: {
+        type: String,
+        enum: ["pending", "processing", "available", "failed", "archived"],
+        default: "pending",
+        index: true,
+      },
+      driveFileId: { type: String, trim: true, default: "" },
+      driveFolderId: { type: String, trim: true, default: "" },
+      streamUrl: { type: String, trim: true, default: "" },
+      thumbnail: { type: String, trim: true, default: "" },
+      duration: { type: Number, default: 0 },
+      fileSize: { type: Number, default: 0 },
+      uploadedAt: { type: Date, default: null },
+      available: { type: Boolean, default: false },
+      downloadAllowed: { type: Boolean, default: false },
+      moodleResourceId: { type: String, trim: true, default: "" },
+      processedAt: { type: Date, default: null },
+    },
+    // ---- AI Feature Preparation (Future Use) ----
+    aiData: {
+      transcript: { type: String, trim: true, default: "" },
+      summary: { type: String, trim: true, default: "" },
+      keywords: [{ type: String, trim: true }],
+      chapters: [{
+        title: { type: String, trim: true },
+        timestamp: { type: Number },
+        duration: { type: Number },
+      }],
+      generatedQuestions: [{
+        question: { type: String, trim: true },
+        type: { type: String, enum: ["multiple-choice", "short-answer", "essay"], default: "multiple-choice" },
+        options: [{ type: String, trim: true }],
+        correctAnswer: { type: String, trim: true },
+      }],
+      flashcards: [{
+        front: { type: String, trim: true },
+        back: { type: String, trim: true },
+        topic: { type: String, trim: true },
+      }],
+    },
     // Lifecycle of the meeting itself (independent of the class `status`):
     //   ready  -> a real/mock meet link is available
     //   pending -> generation not attempted yet or failed (regenerate later)
@@ -64,6 +109,30 @@ const classSessionSchema = new mongoose.Schema(
 
 classSessionSchema.index({ teacher: 1, date: 1 });
 classSessionSchema.index({ classGroup: 1, date: 1 });
+classSessionSchema.index({ "recording.status": 1, "recording.available": 1 });
+
+// Helper to get recording link for backward compatibility
+classSessionSchema.virtual("effectiveRecordingLink").get(function() {
+  // Prefer new recording.streamUrl if available, fallback to legacy recordingLink
+  if (this.recording && this.recording.streamUrl) return this.recording.streamUrl;
+  if (this.recording && this.recording.driveFileId) {
+    // Generate view URL from file ID if needed
+    return `https://drive.google.com/file/d/${this.recording.driveFileId}/view`;
+  }
+  return this.recordingLink || "";
+});
+
+// Helper to get recording status text for display
+classSessionSchema.virtual("recordingStatusDisplay").get(function() {
+  const status = this.recording?.status || "pending";
+  const available = this.recording?.available || false;
+  
+  if (status === "available" && available) return "Available ✓";
+  if (status === "processing") return "Processing...";
+  if (status === "failed") return "Failed";
+  if (status === "archived") return "Archived";
+  return "Pending";
+});
 
 classSessionSchema.pre("validate", function computeDuration(next) {
   if (this.startTime && this.endTime) {

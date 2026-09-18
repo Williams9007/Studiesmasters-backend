@@ -94,7 +94,11 @@ export async function createCalendarEvent({
 
   let res;
   try {
-    res = await fetch(`${config.calendarBaseUrl}/calendars/primary/events`, {
+    // conferenceDataVersion=1 is REQUIRED for Google to honour the
+    // conferenceData.createRequest and provision the Google Meet link.
+    // Without it the API silently creates a plain event with no conference,
+    // which surfaces as GOOGLE_NO_MEET_LINK below (verified live).
+    res = await fetch(`${config.calendarBaseUrl}/calendars/primary/events?conferenceDataVersion=1`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
