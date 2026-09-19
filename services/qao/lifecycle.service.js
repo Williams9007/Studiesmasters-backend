@@ -137,10 +137,20 @@ async function goLive(session) {
   session.status = "live";
   await session.save();
   const payload = { sessionId: session._id, subject: session.classGroup?.subject || "Class" };
+  const teacherId = session.substituteTeacher || session.teacher;
+  const group = session.classGroup;
   emitToQaos("class:live", payload);
-  emitToTeacher(session.substituteTeacher || session.teacher, "class:live", payload);
+  emitToTeacher(teacherId, "class:live", payload);
   try { emitToStudents(await groupStudentIds(session.classGroup), "class:live", payload); } catch { /* non-fatal */ }
   try { await syncClassSession(session, { action: CLASS_SYNC_ACTIONS.UPDATED }); } catch { /* non-fatal */ }
+  // Durable notifications (persistent + socket) for teacher and students
+  try {
+    await createNotification({ userId: teacherId, role: "teacher", title: "Class is live", message: `${group?.subject || "Class"} class is now live — join the session.`, type: "info" });
+    const studentIds = await groupStudentIds(session.classGroup);
+    if (studentIds.length) {
+      await notifyStudents({ studentIds, title: "Class is live", message: `Your ${group?.subject || "Class"} class is now live — log in to join.`, type: "info" });
+    }
+  } catch { /* non-fatal */ }
   await logQaoAction({ action: "CLASS_AUTO_LIVE", resource: "ClassSession", resourceId: session._id, details: { by: "lifecycle" } });
 }
 
@@ -149,10 +159,20 @@ async function goCompleted(session) {
   session.status = "completed";
   await session.save();
   const payload = { sessionId: session._id, subject: session.classGroup?.subject || "Class" };
+  const teacherId = session.substituteTeacher || session.teacher;
+  const group = session.classGroup;
   emitToQaos("class:ended", payload);
-  emitToTeacher(session.substituteTeacher || session.teacher, "class:ended", payload);
+  emitToTeacher(teacherId, "class:ended", payload);
   try { emitToStudents(await groupStudentIds(session.classGroup), "class:ended", payload); } catch { /* non-fatal */ }
   try { await syncClassSession(session, { action: CLASS_SYNC_ACTIONS.UPDATED }); } catch { /* non-fatal */ }
+  // Durable notifications (persistent + socket) for teacher and students
+  try {
+    await createNotification({ userId: teacherId, role: "teacher", title: "Class completed", message: `${group?.subject || "Class"} class has ended — recording and summary will be available shortly.`, type: "info" });
+    const studentIds = await groupStudentIds(session.classGroup);
+    if (studentIds.length) {
+      await notifyStudents({ studentIds, title: "Class completed", message: `Your ${group?.subject || "Class"} class has ended — check your dashboard for the recording and summary.`, type: "info" });
+    }
+  } catch { /* non-fatal */ }
   await logQaoAction({ action: "CLASS_AUTO_COMPLETED", resource: "ClassSession", resourceId: session._id, details: { by: "lifecycle" } });
 }
 

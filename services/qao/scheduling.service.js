@@ -5,8 +5,7 @@ import { emitToQaos, emitToTeacher, emitToStudents, emitToAdmin } from "./notify
 import { logQaoAction } from "./audit.service.js";
 import { createMeeting } from "../google/meet.service.js";
 import { syncClassSession, CLASS_SYNC_ACTIONS } from "../moodle/syncClass.js";
-import { notifyTeacher, notifyStudents } from "./notification.service.js";
-import { sendPushToAll } from "../../Controllers/pushNotificationController.js";
+import { notifyTeacher, notifyStudents, notifyAllQaos } from "./notification.service.js";
 
 const SAFE_TEACHER_FIELDS = "fullName email employeeRole employmentStatus photo";
 const SAFE_GROUP_FIELDS = "code curriculum grade subject capacity status schedule meetingLink";
@@ -378,6 +377,20 @@ await session.save();
   if (becameCancelled) {
     emitToQaos("class:cancelled", { sessionId: session._id });
     emitToTeacher(session.teacher, "class:cancelled", { sessionId: session._id });
+    try {
+      const groupDoc = await ClassGroup.findById(session.classGroup).select("students").lean();
+      const studentIds = groupDoc?.students || [];
+      if (studentIds.length) {
+        await notifyStudents({
+          studentIds,
+          title: "Class cancelled",
+          message: `Your ${session.classGroup?.subject || "Class"} class on ${new Date(session.date).toLocaleDateString()} at ${session.startTime} has been cancelled.`,
+          type: "alert",
+        });
+        emitToStudents(studentIds, "class:cancelled", { sessionId: session._id, classGroup: session.classGroup?.code });
+      }
+    } catch { /* non-fatal */ }
+    try { await syncClassSession(session, { action: CLASS_SYNC_ACTIONS.CANCELLED }); } catch { /* non-fatal */ }
   }
   return ClassSession.findById(session._id)
     .populate("teacher", SAFE_TEACHER_FIELDS)
@@ -389,14 +402,29 @@ await session.save();
 export async function deleteSession(id) {
   const session = await ClassSession.findById(id);
   if (!session) throw new Error("Session not found");
-const wasActive = ["scheduled", "live"].includes(session.status);
+  const wasActive = ["scheduled", "live"].includes(session.status);
+  const classGroupCode = session.classGroup?.code;
+  const teacherId = session.teacher;
+  const studentIds = (session.classGroup ? await ClassGroup.findById(session.classGroup).select("students").lean() : null)?.students || [];
   await session.deleteOne();
-  if (wasActive) emitToQaos("class:cancelled", { sessionId: id });
+  if (wasActive) {
+    emitToQaos("class:cancelled", { sessionId: id });
+    emitToTeacher(teacherId, "class:cancelled", { sessionId: id });
+    if (studentIds.length) {
+      await notifyStudents({
+        studentIds,
+        title: "Class cancelled",
+        message: `Your ${session.classGroup?.subject || "Class"} class on ${new Date(session.date).toLocaleDateString()} at ${session.startTime} has been cancelled.`,
+        type: "alert",
+      }).catch(() => {});
+    }
+    try { await syncClassSession(session, { action: CLASS_SYNC_ACTIONS.CANCELLED }); } catch { /* non-fatal */ }
+  }
   await logQaoAction({
     action: "SESSION_DELETED",
     resource: "ClassSession",
     resourceId: id,
-    details: { wasActive, teacher: String(session.teacher), status: session.status },
+    details: { wasActive, teacher: String(teacherId), classGroup: classGroupCode, studentCount: studentIds.length, status: session.status },
   });
   return { ok: true, deleted: id };
 }

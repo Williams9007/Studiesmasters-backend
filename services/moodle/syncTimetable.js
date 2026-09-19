@@ -163,25 +163,23 @@ export async function syncTimetableForStudent({ studentId, from = null, to = nul
       const sid = String(session._id);
       if (!body) { failed += 1; events.push({ sessionId: sid, error: "un-timed session" }); continue; }
       try {
-        if (existing.has(sid)) {
-          await callWs("core_calendar_update_calendar_events", { "events[0][eventid]": existing.get(sid), "events[0][name]": body.name, "events[0][description]": body.description, "events[0][format]": body.format, "events[0][timestart]": body.timestart, "events[0][timeduration]": body.timeduration });
-          updated += 1;
-          events.push({ sessionId: sid, moodleEventId: existing.get(sid), action: "updated" });
-        } else {
-          const res = await callWs("core_calendar_create_calendar_events", {
-            "events[0][userid]": user.moodleUserId,
-            "events[0][name]": body.name,
-            "events[0][description]": body.description,
-            "events[0][format]": body.format,
-            "events[0][timestart]": body.timestart,
-            "events[0][timeduration]": body.timeduration,
-            "events[0][visible]": body.visible,
-          });
-          const createdEv = Array.isArray(res?.events) ? res.events[0] : res?.event || null;
-          const moodleEventId = Number(createdEv?.id || createdEv?.eventid || 0) || null;
-          created += 1;
-          events.push({ sessionId: sid, moodleEventId, action: "created" });
+        const existingId = existing.get(sid);
+        if (existingId) {
+          await callWs("core_calendar_delete_calendar_events", { "events[0][eventid]": existingId, "events[0][repeat]": 0 });
         }
+        const res = await callWs("core_calendar_create_calendar_events", {
+          "events[0][userid]": user.moodleUserId,
+          "events[0][name]": body.name,
+          "events[0][description]": body.description,
+          "events[0][format]": body.format,
+          "events[0][timestart]": body.timestart,
+          "events[0][timeduration]": body.timeduration,
+          "events[0][visible]": body.visible,
+        });
+        const createdEv = Array.isArray(res?.events) ? res.events[0] : res?.event || null;
+        const moodleEventId = Number(createdEv?.id || createdEv?.eventid || 0) || null;
+        created += 1;
+        events.push({ sessionId: sid, moodleEventId, action: existingId ? "recreated" : "created" });
       } catch (err) {
         failed += 1;
         events.push({ sessionId: sid, error: String(err?.message || err).slice(0, 200) });
@@ -285,25 +283,23 @@ export async function syncTimetableForTeacher({ teacherId, from = null, to = nul
       const sid = String(session._id);
       if (!body) { failed += 1; events.push({ sessionId: sid, error: "un-timed session" }); continue; }
       try {
-        if (existing.has(sid)) {
-          await callWs("core_calendar_update_calendar_events", { "events[0][eventid]": existing.get(sid), "events[0][name]": body.name, "events[0][description]": body.description, "events[0][format]": body.format, "events[0][timestart]": body.timestart, "events[0][timeduration]": body.timeduration });
-          updated += 1;
-          events.push({ sessionId: sid, moodleEventId: existing.get(sid), action: "updated" });
-        } else {
-          const res = await callWs("core_calendar_create_calendar_events", {
-            "events[0][userid]": user.moodleUserId,
-            "events[0][name]": body.name,
-            "events[0][description]": body.description,
-            "events[0][format]": body.format,
-            "events[0][timestart]": body.timestart,
-            "events[0][timeduration]": body.timeduration,
-            "events[0][visible]": body.visible,
-          });
-          const createdEv = Array.isArray(res?.events) ? res.events[0] : res?.event || null;
-          const moodleEventId = Number(createdEv?.id || createdEv?.eventid || 0) || null;
-          created += 1;
-          events.push({ sessionId: sid, moodleEventId, action: "created" });
+        const existingId = existing.get(sid);
+        if (existingId) {
+          await callWs("core_calendar_delete_calendar_events", { "events[0][eventid]": existingId, "events[0][repeat]": 0 });
         }
+        const res = await callWs("core_calendar_create_calendar_events", {
+          "events[0][userid]": user.moodleUserId,
+          "events[0][name]": body.name,
+          "events[0][description]": body.description,
+          "events[0][format]": body.format,
+          "events[0][timestart]": body.timestart,
+          "events[0][timeduration]": body.timeduration,
+          "events[0][visible]": body.visible,
+        });
+        const createdEv = Array.isArray(res?.events) ? res.events[0] : res?.event || null;
+        const moodleEventId = Number(createdEv?.id || createdEv?.eventid || 0) || null;
+        created += 1;
+        events.push({ sessionId: sid, moodleEventId, action: existingId ? "recreated" : "created" });
       } catch (err) {
         failed += 1;
         events.push({ sessionId: sid, error: String(err?.message || err).slice(0, 200) });
