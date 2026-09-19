@@ -51,6 +51,28 @@ router.get("/sso/verify", async (req, res) => {
   return res.json({ success: true, ...verdict });
 });
 
+// ---- Main website name sync (studiesmasters_mainwebsite_sync) --------------
+// Called by the Moodle SSO plugin (sso.php) during SSO login when the main
+// website sync URL + token are configured. Returns the real user name from the
+// StudiesMasters main website so Moodle user names stay current.
+// The plugin calls this as a GET with query params (email + token); token-gated.
+router.get("/main-website/sync-name", async (req, res) => {
+  try {
+    const { email, token } = req.query || {};
+    if (!email) return fail(res, 400, "email is required");
+    const config = await import("../services/moodle/config.js");
+    const expectedToken = config.default?.mainWebsiteSyncToken;
+    if (expectedToken && token !== expectedToken) {
+      return fail(res, 401, "invalid token");
+    }
+    const { syncMainWebsiteName } = await import("../services/moodle/syncMainWebsiteName.js");
+    return ok(res, await syncMainWebsiteName({ email, req }));
+  } catch (err) {
+    console.error("Main website sync-name error:", err);
+    return fail(res, 500, "Name sync failed");
+  }
+});
+
 // ---- Timetable / live-class sync (stock Moodle calendar events) ------------
 // Students push their week into their own Moodle calendar (so Moodle is the
 // place they access live classes); admins can bulk re-push live classes.

@@ -21,6 +21,7 @@ import { processQueueBatch, startWorker } from "./worker.js";
 import { store } from "./store.js";
 import { resolveStudentAccess, resolveSubjects } from "./accessResolver.js";
 import { recordSyncStatus, syncOverview, listWarnings, retryFailedSyncs } from "./syncStatus.js";
+import { syncMainWebsiteName } from "./syncMainWebsiteName.js";
 
 export const moodle = {
   config,
@@ -59,6 +60,7 @@ export const moodle = {
   replayClassSync: replayQueuedClassSync,
   syncClassSession,
   toMoodleDisplay,
+  syncMainWebsiteName,
 };
 
 export {
@@ -69,7 +71,7 @@ export {
   resolveStudentAccess, resolveSubjects, recordSyncStatus, syncOverview,
   listWarnings, retryFailedSyncs,
   bump as bumpMetrics, processQueueBatch, startWorker, store, replayQueuedClassSync,
-  syncClassSession, toMoodleDisplay,
+  syncClassSession, toMoodleDisplay, syncMainWebsiteName,
 };
 
 export default moodle;

@@ -80,6 +80,13 @@ export function isValidSecretConfigured() {
 export const config = {
   enabled: String(process.env.MOODLE_ENABLED || "true") === "true",
 
+  // Main website name sync (studiesmasters_mainwebsite_sync)
+  // Token-gated endpoint that the Moodle SSO plugin calls to get the real user
+  // name from the main website. Set MAIN_WEBSITE_SYNC_TOKEN in .env and the
+  // matching URL + token in Moodle plugin settings (Site administration >
+  // Plugins > Local plugins > StudiesMasters SSO).
+  mainWebsiteSyncToken: asString(process.env.MAIN_WEBSITE_SYNC_TOKEN),
+
   // Wire end-points
   baseUrl: asString(process.env.MOODLE_BASE_URL).replace(/\/$/, ""),
   ssoPath: (() => {
