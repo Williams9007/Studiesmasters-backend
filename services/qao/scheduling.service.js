@@ -135,10 +135,26 @@ export async function createSession(data = {}) {
   const quiet = data.quiet === true || data.skipNotify === true || data.bulk === true;
 
   // ---- Moodle display sync (backend still the source of truth) -------------
+  // ORDER MATTERS. A class is pushed to Moodle as a COURSE calendar event, and a
+  // course event is only visible to members enrolled in that course. Without
+  // enrolling the class group first, the assigned teacher saw NOTHING in their
+  // Moodle calendar even though the push had "succeeded".
+  let syncResult = null;
   try {
-    await syncClassSession(session, {
+    const { syncClassGroupEnrollment } = await import("../moodle/syncTimetable.js");
+    await syncClassGroupEnrollment({ classGroupId: classGroup });
+  } catch { /* enrollment sync is best-effort; never block scheduling */ }
+  try {
+    syncResult = await syncClassSession(session, {
       action: session.meetingStatus === "ready" ? CLASS_SYNC_ACTIONS.MEETING_READY : CLASS_SYNC_ACTIONS.CREATED,
     });
+    // Persist the Moodle event id back to the session document so later
+    // updates/deletes can target the same event (idempotent, no duplicates).
+    if (syncResult?.moodleEventId && session._id) {
+      session.moodleEventId = syncResult.moodleEventId;
+      session.moodleCourseId = syncResult.moodleCourseId || undefined;
+      await session.save().catch(() => {});
+    }
   } catch { /* display sync must never break scheduling */ }
 
   emitToQaos("schedule:created", { sessionId: session._id, classGroup: group.code, date: session.date });

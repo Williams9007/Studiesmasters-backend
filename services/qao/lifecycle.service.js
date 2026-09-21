@@ -27,19 +27,37 @@ function toMinutes(hhmm) {
   return h * 60 + (m || 0);
 }
 
+/**
+ * Absolute instant of the session's start / end.
+ *
+ * `session.date` is UTC midnight of the INTENDED calendar day, so the day parts
+ * must come from getUTC*. Using local midnight (the old setHours(0,0,0,0)) shifted
+ * the whole lifecycle — auto live/completed transitions AND every 24h/1h/30m
+ * reminder — by a day on any server whose timezone isn't UTC.
+ */
+export function sessionStartInstant(session) {
+  if (!session?.date) return null;
+  const d = new Date(session.date);
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0) + toMinutes(session.startTime) * 60000);
+}
+
+export function sessionEndInstant(session) {
+  if (!session?.date) return null;
+  const d = new Date(session.date);
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0) + toMinutes(session.endTime) * 60000);
+}
+
 /** minutes until the session starts (negative = already started) */
 export function minutesUntilStart(session, now = new Date()) {
-  const day = new Date(session.date);
-  day.setHours(0, 0, 0, 0);
-  const start = new Date(day.getTime() + toMinutes(session.startTime) * 60000);
+  const start = sessionStartInstant(session);
+  if (!start) return Number.POSITIVE_INFINITY;
   return Math.round((start.getTime() - now.getTime()) / 60000);
 }
 
 /** minutes since the session ended (negative = not ended yet) */
 export function minutesSinceEnd(session, now = new Date()) {
-  const day = new Date(session.date);
-  day.setHours(0, 0, 0, 0);
-  const end = new Date(day.getTime() + toMinutes(session.endTime) * 60000);
+  const end = sessionEndInstant(session);
+  if (!end) return Number.NEGATIVE_INFINITY;
   return Math.round((now.getTime() - end.getTime()) / 60000);
 }
 
@@ -221,11 +239,15 @@ async function checkPlanExpiry(now = new Date()) {
 /** One scheduler pass. Safe to call repeatedly; every step is non-fatal. */
 export async function runLifecycleTick() {
   const now = new Date();
-  const dayStart = new Date(now); dayStart.setHours(0, 0, 0, 0);
-  const horizon = new Date(now.getTime() + 25 * 60 * 60 * 1000); // 25h window
+  // ±48h instant window around "now". ClassSession.date is UTC midnight of the
+  // intended day, so a local-midnight window (the old code) could miss today's or
+  // tomorrow's sessions entirely on a non-UTC server — which silently stopped
+  // the auto scheduled -> live -> completed transitions from ever running.
+  const from = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+  const to = new Date(now.getTime() + 48 * 60 * 60 * 1000);
 
   const sessions = await ClassSession.find({
-    date: { $gte: new Date(dayStart.getTime() - 24 * 60 * 60 * 1000), $lt: horizon },
+    date: { $gte: from, $lt: to },
     status: { $in: ["scheduled", "live"] },
   })
     .populate("classGroup", "code subject grade curriculum")

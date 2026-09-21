@@ -103,6 +103,9 @@ const classSessionSchema = new mongoose.Schema(
     // for history/reporting.
     substituteTeacher: { type: mongoose.Schema.Types.ObjectId, ref: "Teacher", default: null },
     notes: { type: String, trim: true, default: "" },
+    // ---- Moodle display sync tracking (set after successful push) ----
+    moodleEventId: { type: Number, default: null },
+    moodleCourseId: { type: Number, default: null },
   },
   { timestamps: true }
 );

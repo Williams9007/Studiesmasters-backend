@@ -78,8 +78,12 @@ export async function callWs(wsfunction, params = {}) {
       });
       const body = parseBody(resp.data);
       if (body && typeof body === "object" && body.exception) {
+        // Moodle returns a generic "Invalid parameter value detected" in
+        // `message`, but `debuginfo` names the offending key(s). Surface both so
+        // a WS fault is actually diagnosable from the logs/audit trail.
+        const detail = body.debuginfo ? ` — ${String(body.debuginfo).slice(0, 400)}` : "";
         throw new MoodleWsError(
-          `Moodle WS '${wsfunction}' fault: ${body.message || body.errorcode || "unknown"}`,
+          `Moodle WS '${wsfunction}' fault: ${body.message || body.errorcode || "unknown"}${detail}`,
           { code: "MOODLE_WS_APPLICATION", transient: false, data: body }
         );
       }

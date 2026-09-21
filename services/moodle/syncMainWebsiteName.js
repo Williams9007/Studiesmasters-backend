@@ -7,8 +7,7 @@
 // Only names are returned — passwords, roles and enrolments are never touched.
 //
 // Contract (for the Moodle plugin):
-//   POST /api/main-website/sync-name
-//   Body: { email, token }
+//   GET /api/main-website/sync-name?email=...&token=...
 //   Response: { success: true, fullName: "..." }  |  { success: false, reason: "..." }
 
 import Student from "../../models/Student.js";

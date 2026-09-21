@@ -36,10 +36,10 @@ export async function audit({ action, studentRef, teacherRef, role, moodleUserId
     { student: studentRef, moodleUserId, runId, failure });
 
   if (config.auditToDb) {
-    try {
+        try {
       await MoodleAuditLog.create(entry);
     } catch (err) {
-      logger.error("Moodle audit DB write failed:", err.message);
+      logger.error("Moodle audit DB write failed:", err.message, err.stack || "", JSON.stringify(entry).slice(0, 500));
     }
   }
   return entry;

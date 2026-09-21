@@ -36,6 +36,7 @@ const moodleAuditSchema = new mongoose.Schema(
         "CLASS_UPDATED",
         "CLASS_MEETING_READY",
         "CLASS_CANCELLED",
+        "GROUP_ENROLL_SYNC",
       ],
       required: true,
       index: true,

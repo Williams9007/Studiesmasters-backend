@@ -24,6 +24,7 @@ import ClassSession from "../../models/ClassSession.js";
 import "../../models/teacher.js"; // register the Teacher model (refs in ClassGroup/ClassSession)
 import { config } from "./config.js";
 import { callWs } from "./client.js";
+import { getCourseIdsFor } from "./courseMapper.js";
 import { moodleUsernameFor } from "./store.js";
 import { syncProfile } from "./syncProfile.js";
 import { syncClassSession, CLASS_SYNC_ACTIONS } from "./syncClass.js";
@@ -43,15 +44,29 @@ function defaultRange() {
   return { from, to };
 }
 
-/** Epoch start + duration in minutes for a session (or null if un-timed). */
+/**
+ * Epoch start + duration (in SECONDS) for a session.
+ *
+ * Two bugs lived here:
+ *  1. `session.date` is UTC midnight of the INTENDED calendar day, so the date
+ *     parts must be read with getUTC*. Using local getters (setHours) moved
+ *     every Moodle event a day backwards for anything behind UTC.
+ *  2. `timeduration` was divided by 60 — but Moodle's calendar API expects
+ *     SECONDS (syncClass.js already passes seconds). An hour-long class was
+ *     therefore pushed as a ~1-minute event, which renders as an invisible
+ *     sliver in Moodle's calendar.
+ */
 function sessionTimes(session) {
-  const [h, m] = String(session.startTime || "0:0").split(":").map(Number);
+  const [h, m] = String(session.startTime || "").split(":").map(Number);
   if (!Number.isFinite(h)) return null;
-  const start = new Date(new Date(session.date).setHours(h || 0, m || 0, 0, 0));
+  const src = new Date(session.date);
+  const start = new Date(Date.UTC(src.getUTCFullYear(), src.getUTCMonth(), src.getUTCDate(), h || 0, m || 0, 0));
   const [eh, em] = String(session.endTime || "").split(":").map(Number);
-  let duration = 3600;
-  if (Number.isFinite(eh)) duration = Math.max(300, eh * 3600 + em * 60 - (h * 3600 + m * 60));
-  return { timestart: Math.floor(start.getTime() / 1000), timeduration: Math.floor(duration / 60) };
+  let timeduration = 3600; // seconds
+  if (Number.isFinite(eh)) {
+    timeduration = Math.max(300, (eh * 3600 + em * 60) - ((h || 0) * 3600 + (m || 0) * 60));
+  }
+  return { timestart: Math.floor(start.getTime() / 1000), timeduration };
 }
 
 function eventBody(session) {
@@ -61,7 +76,7 @@ function eventBody(session) {
   const teacher = session.teacher?.fullName || session.teacher?.name || "Teacher TBA";
   const description = [
     `<p><b>${session.classGroup?.subject || session.subject || "Class"}</b> · ${session.classGroup?.grade || session.grade || ""}</p>`,
-    `<p>${new Date(session.date).toDateString()} · ${session.startTime}–${session.endTime}</p>`,
+    `<p>${new Date(session.date).toLocaleDateString("en-GB", { timeZone: "UTC", day: "numeric", month: "short", year: "numeric" })} · ${session.startTime}–${session.endTime}</p>`,
     `<p>Tutor: ${teacher}</p>`,
     session.meetingLink
       ? `<p><a href="${session.meetingLink}">Join Virtual Class</a></p>`
@@ -101,7 +116,15 @@ async function resolveMoodleUser(principal, role) {
 /** Existing user-event ids keyed by the embedded session id. */
 async function existingUserEventIds() {
   try {
-    const events = await callWs("core_calendar_get_calendar_events", { userevents: 1, siteevents: 0 });
+    // Moodle 4.5 REJECTS the flat `userevents` / `siteevents` keys with
+    // "Unexpected keys (userevents, siteevents) detected". The correct shape is
+    // `options[userevents]` / `options[siteevents]` (verified live against
+    // 4.5.13). Getting this wrong made the map always empty, so re-syncs never
+    // reused (or deleted) the previous event.
+    const events = await callWs("core_calendar_get_calendar_events", {
+      "options[userevents]": 1,
+      "options[siteevents]": 1,
+    });
     const map = new Map();
     for (const ev of events?.events || []) {
       if (typeof ev?.name === "string" && ev.name.startsWith(EVENT_NAME_PREFIX)) {
@@ -111,6 +134,80 @@ async function existingUserEventIds() {
     }
     return map;
   } catch { return new Map(); } // listing failure must not block creation
+}
+
+/**
+ * Resolve the Moodle course id for a session so the calendar event lands on the
+ * right course calendar (visible to the enrolled teacher + students). Returns
+ * null when no mapping exists — the caller then creates a SITE event instead.
+ */
+async function resolveCourseIdForSession(session) {
+  try {
+    const group = session?.classGroup && typeof session.classGroup === "object" ? session.classGroup : {};
+    const ids = await getCourseIdsFor({
+      subjects: group.subject ? [{ name: group.subject }] : [],
+      curriculum: group.curriculum || null,
+      packageName: null,
+      grade: group.grade || null,
+    });
+    const first = (ids || []).find((n) => Number.isInteger(n) && n > 0);
+    return first || null;
+  } catch { return null; }
+}
+
+/**
+ * Build the create_calendar_events params for ONE session.
+ *
+ * Moodle 4.5.13 accepts EXACTLY these event keys (verified live):
+ *   name, description, format, eventtype, courseid, timestart, timeduration
+ * and REJECTS unknown keys like `userid`, `repeats`, `visible`, `groupid`,
+ * `sequence` with "Invalid parameter value detected: Unexpected keys".
+ * A COURSE event is visible on every enrolled member's calendar; without a
+ * course mapping we fall back to a SITE event so nothing is ever lost.
+ */
+async function createEventParams(session, body) {
+  const courseId = await resolveCourseIdForSession(session);
+  const params = {
+    "events[0][name]": body.name,
+    "events[0][description]": body.description,
+    "events[0][format]": body.format,
+    "events[0][eventtype]": courseId ? "course" : "site",
+    "events[0][timestart]": body.timestart,
+    "events[0][timeduration]": body.timeduration,
+  };
+  if (courseId) params["events[0][courseid]"] = courseId;
+  return { params, courseId };
+}
+
+/**
+ * Prior Moodle event ids recovered from the durable audit trail.
+ *
+ * `core_calendar_get_calendar_events` can only list the token owner's user
+ * events + site events — it does NOT return COURSE events, which is what we now
+ * create. Without this lookup every re-sync would pile up duplicate course
+ * events. The created id is stored inside TIMETABLE_SYNC `detail.events[]`, so
+ * one bounded query recovers them all for the whole run.
+ */
+async function priorEventIdsFromAudit(sessionIds) {
+  const map = new Map();
+  try {
+    if (!sessionIds.length) return map;
+    const MoodleAuditLog = (await import("../../models/MoodleAuditLog.js")).default;
+    const wanted = new Set(sessionIds.map(String));
+    const rows = await MoodleAuditLog.find({ action: "TIMETABLE_SYNC" })
+      .sort({ createdAt: -1 })
+      .limit(200)
+      .select("detail.events")
+      .lean();
+    for (const r of rows) {
+      for (const e of r.detail?.events || []) {
+        const sid = String(e?.sessionId || "");
+        if (!sid || !e?.moodleEventId || !wanted.has(sid)) continue;
+        if (!map.has(sid)) map.set(sid, Number(e.moodleEventId));
+      }
+    }
+  } catch { /* best effort — de-dupe is an optimisation, not a requirement */ }
+  return map;
 }
 
 /**
@@ -153,6 +250,7 @@ export async function syncTimetableForStudent({ studentId, from = null, to = nul
     }
 
     const existing = await existingUserEventIds();
+    const prior = await priorEventIdsFromAudit(sessions.map((s) => s._id));
     let created = 0;
     let updated = 0;
     let failed = 0;
@@ -163,23 +261,16 @@ export async function syncTimetableForStudent({ studentId, from = null, to = nul
       const sid = String(session._id);
       if (!body) { failed += 1; events.push({ sessionId: sid, error: "un-timed session" }); continue; }
       try {
-        const existingId = existing.get(sid);
+        const existingId = existing.get(sid) || prior.get(sid);
         if (existingId) {
           await callWs("core_calendar_delete_calendar_events", { "events[0][eventid]": existingId, "events[0][repeat]": 0 });
         }
-        const res = await callWs("core_calendar_create_calendar_events", {
-          "events[0][userid]": user.moodleUserId,
-          "events[0][name]": body.name,
-          "events[0][description]": body.description,
-          "events[0][format]": body.format,
-          "events[0][timestart]": body.timestart,
-          "events[0][timeduration]": body.timeduration,
-          "events[0][visible]": body.visible,
-        });
+        const { params: createParams, courseId } = await createEventParams(session, body);
+        const res = await callWs("core_calendar_create_calendar_events", createParams);
         const createdEv = Array.isArray(res?.events) ? res.events[0] : res?.event || null;
         const moodleEventId = Number(createdEv?.id || createdEv?.eventid || 0) || null;
         created += 1;
-        events.push({ sessionId: sid, moodleEventId, action: existingId ? "recreated" : "created" });
+        events.push({ sessionId: sid, moodleEventId, moodleCourseId: courseId, action: existingId ? "recreated" : "created" });
       } catch (err) {
         failed += 1;
         events.push({ sessionId: sid, error: String(err?.message || err).slice(0, 200) });
@@ -273,6 +364,7 @@ export async function syncTimetableForTeacher({ teacherId, from = null, to = nul
     }
 
     const existing = await existingUserEventIds();
+    const prior = await priorEventIdsFromAudit(sessions.map((s) => s._id));
     let created = 0;
     let updated = 0;
     let failed = 0;
@@ -283,23 +375,16 @@ export async function syncTimetableForTeacher({ teacherId, from = null, to = nul
       const sid = String(session._id);
       if (!body) { failed += 1; events.push({ sessionId: sid, error: "un-timed session" }); continue; }
       try {
-        const existingId = existing.get(sid);
+        const existingId = existing.get(sid) || prior.get(sid);
         if (existingId) {
           await callWs("core_calendar_delete_calendar_events", { "events[0][eventid]": existingId, "events[0][repeat]": 0 });
         }
-        const res = await callWs("core_calendar_create_calendar_events", {
-          "events[0][userid]": user.moodleUserId,
-          "events[0][name]": body.name,
-          "events[0][description]": body.description,
-          "events[0][format]": body.format,
-          "events[0][timestart]": body.timestart,
-          "events[0][timeduration]": body.timeduration,
-          "events[0][visible]": body.visible,
-        });
+        const { params: createParams, courseId } = await createEventParams(session, body);
+        const res = await callWs("core_calendar_create_calendar_events", createParams);
         const createdEv = Array.isArray(res?.events) ? res.events[0] : res?.event || null;
         const moodleEventId = Number(createdEv?.id || createdEv?.eventid || 0) || null;
         created += 1;
-        events.push({ sessionId: sid, moodleEventId, action: existingId ? "recreated" : "created" });
+        events.push({ sessionId: sid, moodleEventId, moodleCourseId: courseId, action: existingId ? "recreated" : "created" });
       } catch (err) {
         failed += 1;
         events.push({ sessionId: sid, error: String(err?.message || err).slice(0, 200) });
