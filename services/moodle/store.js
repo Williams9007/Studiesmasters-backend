@@ -92,8 +92,17 @@ export async function claimNonce({ nonce, kind = "student" }) {
     const key = `sso:nonce:${nonce}`;
     const raw = await redis.get(key);
     if (!raw) return { ok: false, reason: "nonce not found / already consumed" };
+    // Tombstone (used:true) left by a previous consume. Mirrors the Mongo
+    // store, which keeps its used:true doc until TTL — so a replay stays
+    // distinguishable from a never-minted nonce (reserveNonce needs that).
+    let seen = null;
+    try { seen = JSON.parse(raw); } catch { seen = null; }
+    if (seen && seen.used === true) return { ok: false, reason: "reused" };
     const removed = await redis.getDel(key); // atomically read+delete
     if (!removed) return { ok: false, reason: "nonce already consumed" };
+    // Leave a tombstone for the remaining TTL so any later replay reads as
+    // "reused" instead of looking like a never-minted nonce.
+    await redis.set(key, JSON.stringify({ used: true }), { EX: config.nonceTtlSec });
     let rec = null;
     try { rec = JSON.parse(removed); } catch { rec = { kind }; }
     return { ok: true, record: rec, via: "redis" };
@@ -113,5 +122,41 @@ export async function claimNonce({ nonce, kind = "student" }) {
   return { ok: true, record: claimed, via: "mongo" };
 }
 
-export const store = { generateNonce, claimNonce, findOrCreateLink };
+/**
+ * Admit a CALLER-MINTED nonce on its FIRST sight only (atomic). The Moodle
+ * vclass plugin signs with a nonce IT generated (index.php call_backend) —
+ * it never asked us to mint one — so claimNonce() can never find those.
+ * First sight wins; every later sight is a replay. Identical semantics to
+ * claimNonce, just a different source of truth:
+ *   - Redis: a SEPARATE keyspace (sso:nonce:seen:) so a reserved nonce can
+ *     never leak back through claimNonce() (which delete-on-reads).
+ *   - Mongo: the SsoNonce collection with used:true, so claimNonce() rejects
+ *     later sights itself as "reused" (duplicate key on the unique nonce).
+ */
+export async function reserveNonce({ nonce, kind = "student", studentRef }) {
+  const redis = await getRedis();
+  if (redis) {
+    const key = `sso:nonce:seen:${nonce}`;
+    const set = await redis.set(key, JSON.stringify({ kind, studentRef: String(studentRef) }), { NX: true, EX: config.nonceTtlSec });
+    if (set === "OK") return { ok: true, via: "redis" };
+    return { ok: false, reason: "reused" };
+  }
+  try {
+    await SsoNonce.create({
+      nonce,
+      studentRef,
+      kind,
+      used: true,
+      expiresAt: new Date(Date.now() + config.nonceTtlSec * 1000),
+    });
+    return { ok: true, via: "mongo" };
+  } catch (err) {
+    if (err && (err.code === 11000 || /duplicate/i.test(String(err && err.message)))) {
+      return { ok: false, reason: "reused" };
+    }
+    throw err;
+  }
+}
+
+export const store = { generateNonce, claimNonce, reserveNonce, findOrCreateLink };
 export default store;

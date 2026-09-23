@@ -131,5 +131,23 @@ check("dispatch handles waiting room", plugin.includes("isset($res['waiting'])")
 check("plugin renders Open Meet Link from dashboard", plugin.includes("Open Meet Link") && plugin.includes("$s['meetingLink']"));
 check("plugin surfaces backend errors", plugin.includes("alert-danger") && plugin.includes("$res['success']"));
 
+// ------------------------------- Moodle vclass nonce contract + theme chrome
+console.log("\n[12] vclass: plugin-minted nonce admitted once; theme chrome restored");
+const vclassStore = read(path.join(root, "services", "moodle", "store.js"));
+check("store exports reserveNonce (first-sight admission)", vclassStore.includes("export async function reserveNonce") && /export const store = \{[^}]*reserveNonce/.test(vclassStore));
+check("reserveNonce is atomic (Redis NX + Mongo duplicate-key)", /NX:\s*true/.test(vclassStore) && (vclassStore.includes("11000") || /duplicate/i.test(vclassStore)));
+check("reserved nonces use a separate keyspace (never re-claimable)", vclassStore.includes("sso:nonce:seen:"));
+check("claimNonce leaves a used-tombstone on Redis consume", vclassStore.includes("JSON.stringify({ used: true })"));
+check("verifyClassRequest reserves never-seen nonces", classPortal.includes("reserveNonce(") && /nonce_\$\{/.test(classPortal));
+check("verifyClassRequest rejects usernames with no principal", classPortal.includes('"unknown_user"'));
+check("link resolved before nonce gate (reserve has an owner)", classPortal.indexOf("MoodleLink.findOne({ moodleUsername") < classPortal.indexOf("reserveNonce({"));
+check("plugin mints a fresh nonce per backend call", plugin.includes("bin2hex(random_bytes(16))"));
+check("plugin sets page url before any output", plugin.indexOf("$PAGE->set_url") > -1 && plugin.indexOf("$PAGE->set_url") < plugin.indexOf("vc_header($role)"));
+check("plugin uses native theme header/footer", plugin.includes("$OUTPUT->header()") && plugin.includes("$OUTPUT->footer()"));
+check("plugin registers css via requires->css (no raw link echo)", plugin.includes("requires->css") && !/echo '<link rel=/.test(plugin));
+const vclassVersionPhp = read(path.join(root, "..", "moodle-sso", "local", "studiesmasters_virtualclass", "version.php"));
+const vclassVersion = Number((vclassVersionPhp.match(/\$plugin->version\s*=\s*(\d+)/) || [])[1] || 0);
+check(`plugin version >= 2026092302 for redeploy (got ${vclassVersion})`, vclassVersion >= 2026092302);
+
 console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
 process.exitCode = fail ? 1 : 0;

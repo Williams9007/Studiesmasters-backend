@@ -10,15 +10,18 @@
 //   - The Moodle plugin (which holds the shared secret) signs:
 //         username | email | timestamp | nonce | course
 //     exactly as sso.php expects, and the backend verifies it timing-safe
-//     against every rotation secret, enforces freshness, and consumes the
-//     one-time nonce (replay protection).
+//     against every rotation secret and enforces freshness. The nonce is
+//     one-time either way: nonces WE minted (SSO URLs, tooling) are consumed
+//     by claimNonce(); the nonce the PLUGIN mints itself per request (it has
+//     no round-trip to get one from us) is admitted once by reserveNonce()
+//     and rejected as a replay on every later sight.
 //   - The signed `username` (sm_s_<hex> / sm_t_<hex>) resolves to the Mongo
 //     principal via MoodleLink, so the backend re-applies the same enrollment
 //     + assignment gates as the React meet routes. No PII is ever returned.
 
 import { isFresh } from "./verifySSO.js";
 import { verifyPayload, signPayload } from "./config.js";
-import { generateNonce, claimNonce } from "./store.js";
+import { generateNonce, claimNonce, reserveNonce } from "./store.js";
 import { audit } from "./audit.js";
 import ClassSession from "../../models/ClassSession.js";
 import ClassGroup from "../../models/ClassGroup.js";
@@ -45,15 +48,35 @@ export async function verifyClassRequest({ username, email, timestamp, nonce, co
     await audit({ action: "CLASS_ACCESS_DENIED", outcome: "failure", failure: "signature mismatch", req, moodleUsername: user }).catch(() => {});
     return { ok: false, reason: "signature mismatch", step: "signature" };
   }
-  const claimed = await claimNonce({ nonce, kind: detectKind(user) });
-  if (!claimed.ok) {
-    await audit({ action: "CLASS_ACCESS_DENIED", outcome: "failure", failure: `nonce ${claimed.reason}`, req, moodleUsername: user }).catch(() => {});
-    return { ok: false, reason: `nonce_${claimed.reason}`, step: "nonce" };
-  }
+  // Resolve the principal BEFORE the nonce gate: a plugin-minted nonce is
+  // reserved against its owner, and a username with no MoodleLink has no
+  // principal to authorize — never let it through with a null principalId
+  // (downstream $or:{null} queries would widen to unassigned sessions).
   const link = await MoodleLink.findOne({ moodleUsername: user }).lean();
+  const principalRef = link?.studentRef || link?.teacherRef || null;
+  if (!principalRef) {
+    await audit({ action: "CLASS_ACCESS_DENIED", outcome: "failure", failure: "no MoodleLink for username", req, moodleUsername: user }).catch(() => {});
+    return { ok: false, reason: "unknown_user", step: "identity" };
+  }
+  const kind = detectKind(user);
+  const claimed = await claimNonce({ nonce, kind });
+  if (!claimed.ok) {
+    // Nonces WE minted that report reused/expired stay rejected. "unknown" /
+    // "not found" means the backend never minted this nonce — that is the
+    // Moodle plugin, which signs with a nonce IT generated per request
+    // (index.php call_backend). Admit it on FIRST sight only; reserveNonce
+    // registers it atomically so every later replay fails as "reused".
+    const neverSeen = claimed.reason === "unknown" || String(claimed.reason).includes("not found");
+    const reserved = neverSeen
+      ? await reserveNonce({ nonce, kind, studentRef: principalRef })
+      : { ok: false, reason: claimed.reason };
+    if (!reserved.ok) {
+      await audit({ action: "CLASS_ACCESS_DENIED", outcome: "failure", failure: `nonce ${reserved.reason}`, req, moodleUsername: user }).catch(() => {});
+      return { ok: false, reason: `nonce_${reserved.reason}`, step: "nonce" };
+    }
+  }
   const role = link?.role || detectKind(user);
-  const principalId = (link?.studentRef || link?.teacherRef || null)?.toString();
-  return { ok: true, role, principalId, username: user, email: mail, link };
+  return { ok: true, role, principalId: principalRef.toString(), username: user, email: mail, link };
 }
 
 /**
