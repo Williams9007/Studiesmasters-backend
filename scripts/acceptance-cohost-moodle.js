@@ -99,4 +99,37 @@ check("student: DUMMY text removed from UI", !/DUMMY- code/.test(studentDash) &&
 check("student: mentions Google Meet link", /Google Meet link/.test(studentDash));
 
 console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
+
+// --------------------------------------------- Moodle link + teacher names
+console.log("\n[10] Moodle dashboard link + teacher-name sync");
+const classPortal = read(path.join(root, "services", "moodle", "classPortal.service.js"));
+check("dashboard returns meetingLink", /meetingLink: role === "teacher" \|\| s\.status === "live"/.test(classPortal));
+check("sessions list returns meetingLink", (classPortal.match(/meetingLink: role === "teacher" \|\| s\.status === "live"/g) || []).length >= 2);
+check("teacher join bypasses student enrollment", classPortal.includes("You are not assigned to this class") && /if \(role === "teacher"\)/.test(classPortal));
+check("join falls back to googleMeet.meetingLink", /session\.meetingLink \|\| session\.googleMeet\?\.meetingLink/.test(classPortal));
+check("dashboard populates substituteTeacher", /populate\("substituteTeacher", "fullName"\)/.test(classPortal));
+check("teacher name prefers substitute", classPortal.includes("s.substituteTeacher?.fullName || s.teacher?.fullName"));
+const syncClass = read(path.join(root, "services", "moodle", "syncClass.js"));
+check("toMoodleDisplay reads googleMeet.meetingLink", /meetingLink: s\.meetingLink \|\| s\.googleMeet\?\.meetingLink/.test(syncClass));
+check("toMoodleDisplay prefers substitute teacher", syncClass.includes("s.substituteTeacher?.fullName || s.teacher?.fullName"));
+check("populate guard covers unpopulated teacher", syncClass.includes("session.teacher.fullName === undefined"));
+check("teacher timetable sync populates teacher name", /syncTimetableForTeacher[\s\S]*?\.populate\("teacher", "fullName name"\)/.test(syncTimetable));
+check("eventBody prefers substitute teacher", syncTimetable.includes("session.substituteTeacher?.fullName || session.teacher?.fullName"));
+const moodleCfg = read(path.join(root, "services", "moodle", "config.js"));
+check("WS auto-enabled by MOODLE_WS_TOKEN", /MOODLE_WS_TOKEN/.test(moodleCfg) && /wsEnabled: \(\(\) =>/.test(moodleCfg));
+
+console.log("\n[11] Moodle plugin page renders every view it calls");
+const plugin = read(path.join(root, "..", "moodle-sso", "local", "studiesmasters_virtualclass", "index.php"));
+check("vc_header defined (header() collision removed)", plugin.includes("function vc_header(") && !/function header\s*\(/.test(plugin));
+check("vc_footer defined", plugin.includes("function vc_footer("));
+check("vc_render_dashboard defined", plugin.includes("function vc_render_dashboard("));
+check("vc_render_waiting defined", plugin.includes("function vc_render_waiting("));
+check("vc_render_recordings defined", plugin.includes("function vc_render_recordings("));
+check("vc_render_attendance defined", plugin.includes("function vc_render_attendance("));
+check("call_backend keeps waiting/meeting/rows keys", plugin.includes("$out = $res;"));
+check("dispatch handles waiting room", plugin.includes("isset($res['waiting'])") || plugin.includes("!empty($res['waiting'])"));
+check("plugin renders Open Meet Link from dashboard", plugin.includes("Open Meet Link") && plugin.includes("$s['meetingLink']"));
+check("plugin surfaces backend errors", plugin.includes("alert-danger") && plugin.includes("$res['success']"));
+
+console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
 process.exitCode = fail ? 1 : 0;

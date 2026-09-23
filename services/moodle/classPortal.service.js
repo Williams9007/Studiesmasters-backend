@@ -90,6 +90,7 @@ export async function listUserSessions({ role, principalId }) {
     })
       .populate("classGroup", "code subject grade curriculum")
       .populate("teacher", "fullName")
+      .populate("substituteTeacher", "fullName")
       .sort({ date: 1, startTime: 1 })
       .lean();
   } else {
@@ -100,6 +101,7 @@ export async function listUserSessions({ role, principalId }) {
     })
       .populate("classGroup", "code subject grade curriculum")
       .populate("teacher", "fullName")
+      .populate("substituteTeacher", "fullName")
       .sort({ date: 1, startTime: 1 })
       .lean();
   }
@@ -111,12 +113,17 @@ export async function listUserSessions({ role, principalId }) {
       subject: s.classGroup?.subject || "",
       grade: s.classGroup?.grade || "",
       curriculum: s.classGroup?.curriculum || "",
-      teacher: s.teacher?.fullName || "",
+      teacher: s.substituteTeacher?.fullName || s.teacher?.fullName || "",
       date: s.date,
       startTime: s.startTime,
       endTime: s.endTime,
       status: s.status,
       meetingStatus: s.meetingStatus,
+      // Teachers always see their link (they manage the meeting); students only
+      // once the class is live — the waiting room must keep gating early access.
+      meetingLink: role === "teacher" || s.status === "live"
+        ? (s.meetingLink || s.googleMeet?.meetingLink || "")
+        : "",
       // Students see join only when live; teachers manage the meeting.
       canJoin: role === "student" ? s.status === "live" : true,
       canStart: role === "teacher" && (s.status === "scheduled" || s.status === "live"),
@@ -128,30 +135,53 @@ export async function joinSession({ role, principalId, sessionId, waiting = true
   const session = await ClassSession.findById(sessionId)
     .populate("classGroup", "students subject grade curriculum")
     .populate("teacher", "fullName")
+    .populate("substituteTeacher", "fullName")
     .lean();
   if (!session) return { error: { status: 404, message: "Session not found" } };
+  const base = {
+    sessionId: session._id,
+    subject: session.classGroup?.subject || "",
+    grade: session.classGroup?.grade || "",
+    teacher: session.substituteTeacher?.fullName || session.teacher?.fullName || "",
+    date: session.date,
+    startTime: session.startTime,
+    endTime: session.endTime,
+  };
+  // Teacher (assigned or substitute): they MANAGE the meeting, so they get the
+  // link directly — no student waiting room, no enrollment-in-students check
+  // (teachers are not in group.students, which used to 403 them out of Moodle),
+  // and no student attendance row is recorded for them.
+  if (role === "teacher") {
+    const assigned =
+      String(session.teacher?._id || session.teacher || "") === String(principalId) ||
+      String(session.substituteTeacher?._id || session.substituteTeacher || "") === String(principalId);
+    if (!assigned) return { error: { status: 403, message: "You are not assigned to this class" } };
+    if (session.status === "completed" || session.status === "cancelled") {
+      return { error: { status: 400, message: "This class is no longer joinable" } };
+    }
+    return {
+      ok: true,
+      session: base,
+      meeting: { link: session.meetingLink || session.googleMeet?.meetingLink || "", status: session.meetingStatus },
+    };
+  }
   const group = session.classGroup;
   const enrolled = group && Array.isArray(group.students) && group.students.some((id) => String(id) === String(principalId));
   if (!enrolled) return { error: { status: 403, message: "You are not enrolled in this class" } };
   if (session.status === "completed" || session.status === "cancelled") {
     return { error: { status: 400, message: "This class is no longer joinable" } };
   }
-  const base = {
-    sessionId: session._id,
-    subject: session.classGroup?.subject || "",
-    grade: session.classGroup?.grade || "",
-    teacher: session.teacher?.fullName || "",
-    date: session.date,
-    startTime: session.startTime,
-    endTime: session.endTime,
-  };
   // Waiting room: class not live yet — no link, no attendance. The Moodle page
   // keeps the student "in waiting room" and calls join again once it becomes live.
   if (waiting && session.status !== "live") {
     return { ok: true, waiting: true, session: base };
   }
   await recordAttendance(session._id, { student: principalId, joinedAt: new Date(), source: "client" });
-  return { ok: true, session: base, meeting: { link: session.meetingLink || "", status: session.meetingStatus } };
+  return {
+    ok: true,
+    session: base,
+    meeting: { link: session.meetingLink || session.googleMeet?.meetingLink || "", status: session.meetingStatus },
+  };
 }
 
 /** Student leaves — close their attendance window. */
@@ -216,7 +246,10 @@ const todayStart = () => {
 /**
  * Build the unified dashboard for the current role.
  * Returns { role, liveNow[], upcoming[], past[], waitingSessionId|null }.
- * Only display-safe fields; meeting links are returned only via join().
+ * Display-safe fields. `meetingLink` is included for TEACHERS always (they
+ * manage the meeting and must find it on the Moodle dashboard) and for STUDENTS
+ * only once the class is live — join() remains the waiting-room gate for
+ * everyone else.
  */
 export async function dashboardForUser({ role, principalId }) {
   const today = todayStart();
@@ -229,6 +262,7 @@ export async function dashboardForUser({ role, principalId }) {
     sessions = await ClassSession.find(baseQ)
       .populate("classGroup", "code subject grade curriculum")
       .populate("teacher", "fullName")
+      .populate("substituteTeacher", "fullName")
       .sort({ date: 1, startTime: 1 })
       .lean();
   } else {
@@ -236,6 +270,7 @@ export async function dashboardForUser({ role, principalId }) {
     sessions = await ClassSession.find({ classGroup: { $in: groups.map((g) => g._id) } })
       .populate("classGroup", "code subject grade curriculum")
       .populate("teacher", "fullName")
+      .populate("substituteTeacher", "fullName")
       .sort({ date: 1, startTime: 1 })
       .lean();
   }
@@ -251,12 +286,15 @@ export async function dashboardForUser({ role, principalId }) {
       grade: s.classGroup?.grade || "",
       curriculum: s.classGroup?.curriculum || "",
       code: s.classGroup?.code || "",
-      teacher: s.teacher?.fullName || "",
+      teacher: s.substituteTeacher?.fullName || s.teacher?.fullName || "",
       date: s.date,
       startTime: s.startTime,
       endTime: s.endTime,
       status: s.status,
       meetingStatus: s.meetingStatus,
+      meetingLink: role === "teacher" || s.status === "live"
+        ? (s.meetingLink || s.googleMeet?.meetingLink || "")
+        : "",
       notes: s.notes || "",
       recordingAvailable: Boolean(s.recordingLink),
     };
@@ -276,6 +314,8 @@ export async function attendanceHistoryForUser({ role, principalId }) {
       status: { $in: ["completed", "live", "cancelled"] },
     })
       .populate("classGroup", "code subject grade curriculum")
+      .populate("teacher", "fullName")
+      .populate("substituteTeacher", "fullName")
       .sort({ date: -1 })
       .limit(60)
       .lean();
@@ -285,6 +325,7 @@ export async function attendanceHistoryForUser({ role, principalId }) {
         sessionId: s._id,
         subject: s.classGroup?.subject || "",
         grade: s.classGroup?.grade || "",
+        teacher: s.substituteTeacher?.fullName || s.teacher?.fullName || "",
         date: s.date,
         startTime: s.startTime,
         endTime: s.endTime,
@@ -301,6 +342,8 @@ export async function attendanceHistoryForUser({ role, principalId }) {
     status: { $in: ["completed", "live", "cancelled"] },
   })
     .populate("classGroup", "code subject grade curriculum")
+    .populate("teacher", "fullName")
+    .populate("substituteTeacher", "fullName")
     .sort({ date: -1 })
     .limit(60)
     .lean();
@@ -337,6 +380,7 @@ export async function recordingHistoryForUser({ role, principalId }) {
   const sessions = await ClassSession.find(query)
     .populate("classGroup", "code subject grade curriculum")
     .populate("teacher", "fullName")
+    .populate("substituteTeacher", "fullName")
     .sort({ date: -1 })
     .limit(50)
     .lean();
@@ -344,7 +388,7 @@ export async function recordingHistoryForUser({ role, principalId }) {
     sessionId: s._id,
     subject: s.classGroup?.subject || "",
     grade: s.classGroup?.grade || "",
-    teacher: s.teacher?.fullName || "",
+    teacher: s.substituteTeacher?.fullName || s.teacher?.fullName || "",
     date: s.date,
     duration: s.durationMinutes,
     recordingLink: s.recordingLink,

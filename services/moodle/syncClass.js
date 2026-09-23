@@ -50,11 +50,14 @@ export function toMoodleDisplay(session) {
     subject: s.subject || s.classGroup?.subject || "",
     grade: s.grade || s.classGroup?.grade || "",
     curriculum: s.curriculum || s.classGroup?.curriculum || "",
-    teacher: s.teacherName || s.teacher?.fullName || "",
+    // Substitute covers -> show the substitute; fall back to the assigned teacher.
+    teacher: s.teacherName || s.substituteTeacher?.fullName || s.teacher?.fullName || "",
     date: s.date ? new Date(s.date).toISOString() : null,
     startTime: s.startTime || "",
     endTime: s.endTime || "",
-    meetingLink: s.meetingLink || "",
+    // Top-level link first (authoritative), googleMeet sub-doc as fallback so
+    // backfilled/pre-feature sessions still reach the Moodle event description.
+    meetingLink: s.meetingLink || s.googleMeet?.meetingLink || "",
     status: s.status || "scheduled",
     meetingStatus: s.meetingStatus || "pending",
     recordingLink: s.recordingLink || "",
@@ -95,7 +98,13 @@ export async function syncClassSession(session, { action = CLASS_SYNC_ACTIONS.UP
   const id = sessionId || session?._id || session?.sessionId || "";
   // Ensure the session is populated so display fields (subject, grade, teacher) resolve.
   let populated = session;
-  if (session?.classGroup && !session.classGroup.subject) {
+  // Refetch (with populate) when classGroup is still a raw ObjectId OR when
+  // teacher was passed unpopulated — otherwise the Moodle event title/description
+  // would render with a blank teacher name.
+  const needsPopulate =
+    (session?.classGroup && !session.classGroup.subject) ||
+    (session?.teacher && session.teacher.fullName === undefined);
+  if (needsPopulate) {
     // classGroup is an ObjectId ref, not populated — fetch the populated doc.
     try {
       const ClassSession = (await import("../../models/ClassSession.js")).default;

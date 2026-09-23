@@ -97,7 +97,16 @@ export const config = {
   ssoClockSkewSec: parseInt(process.env.MOODLE_SSO_CLOCK_SKEW || "300", 10),
 
   // REST Web Services (the backend is the only authority).
-  wsEnabled: String(process.env.MOODLE_WS_ENABLED || "false") === "true",
+  // WS push is enabled when explicitly requested, or implicitly whenever a
+  // token is provided (an explicit "false" still wins). Without this, setting
+  // only MOODLE_WS_TOKEN left wsEnabled=false and every class sync silently
+  // fell into the audit-only outbox — nothing (Meet link, teacher name) ever
+  // reached the Moodle dashboard/calendar.
+  wsEnabled: (() => {
+    const explicit = String(process.env.MOODLE_WS_ENABLED ?? "").trim().toLowerCase();
+    if (explicit) return explicit === "true";
+    return Boolean(String(process.env.MOODLE_WS_TOKEN ?? "").trim());
+  })(),
   wsUrl: asString(process.env.MOODLE_WS_URL) || `${asString(process.env.MOODLE_BASE_URL)}/webservice/rest/server.php`,
   wsToken: asString(process.env.MOODLE_WS_TOKEN),
   dryRun: String(process.env.MOODLE_DRY_RUN || "true") === "true",

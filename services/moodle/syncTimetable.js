@@ -79,7 +79,8 @@ function eventBody(session) {
   const t = sessionTimes(session);
   if (!t) return null;
   const groupId = String(session._id || session.sessionId || "");
-  const teacher = session.teacher?.fullName || session.teacher?.name || "Teacher TBA";
+  // Substitute covers the class -> their name is the teacher students see.
+  const teacher = session.substituteTeacher?.fullName || session.teacher?.fullName || session.teacher?.name || "Teacher TBA";
   const meetingLink = resolveMeetingLink(session);
   const description = [
     `<p><b>${session.classGroup?.subject || session.subject || "Class"}</b> · ${session.classGroup?.grade || session.grade || ""}</p>`,
@@ -354,6 +355,10 @@ export async function syncTimetableForTeacher({ teacherId, from = null, to = nul
       status: { $in: ["scheduled", "live"] },
     })
       .populate("classGroup", "code subject grade curriculum")
+      // Without this populate eventBody() read .fullName off an ObjectId and
+      // every Moodle calendar event said "Tutor: Teacher TBA".
+      .populate("teacher", "fullName name")
+      .populate("substituteTeacher", "fullName")
       .sort({ date: 1, startTime: 1 })
       .lean();
 
