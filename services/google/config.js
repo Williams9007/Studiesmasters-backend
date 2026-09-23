@@ -45,7 +45,14 @@ export const config = {
 
   // Calendar + Meet API base.
   calendarBaseUrl: asString(process.env.GOOGLE_CALENDAR_BASE_URL, "https://www.googleapis.com/calendar/v3"),
-  scopes: asString(process.env.GOOGLE_SCOPES, "https://www.googleapis.com/auth/calendar.events openid"),
+  // Scope note: meetings.space.created is REQUIRED for co-host promotion via
+  // Meet API v2 (POST /v2/spaces/{space}/members). Tokens issued BEFORE this
+  // scope was added will keep the old grant until re-consented (re-connect the
+  // company Google account once after deploying this change).
+  scopes: asString(
+    process.env.GOOGLE_SCOPES,
+    "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/meetings.space.created openid"
+  ),
   timezone: asString(process.env.GOOGLE_TIMEZONE, "UTC"),
 
   // HTTP timeouts / retries (kept in the same spirit as moodle config).

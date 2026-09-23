@@ -927,6 +927,38 @@ router.put("/replacement", adminAuth, async (req, res) => {
       }
     }
 
+    // Swap Meet API co-host membership: revoke the old teacher's COHOST role
+    // (so they can no longer manage the class) and promote the new teacher.
+    // Both are best-effort — never fail the replacement if the Meet API errs.
+    let coHostSwapped = false;
+    if (session.conferenceId || session.meetingCode || session.googleMeet?.conferenceId || session.googleMeet?.meetingCode) {
+      try {
+        const { removeMemberFromMeeting, promoteTeacherToCohost } = await import("../services/google/meet.service.js");
+        const spaceKeys = {
+          conferenceId: session.conferenceId || session.googleMeet?.conferenceId,
+          meetingCode: session.meetingCode || session.googleMeet?.meetingCode,
+        };
+        if (oldTeacher.googleMeetEmail) {
+          const removal = await removeMemberFromMeeting({ ...spaceKeys, email: oldTeacher.googleMeetEmail });
+          if (!removal.removed) {
+            console.warn(`Old teacher Meet member removal failed: ${removal.reason}`);
+          }
+        }
+        if (newTeacher.googleAccountVerified && newEmail) {
+          const promo = await promoteTeacherToCohost({ ...spaceKeys, teacherEmail: newEmail });
+          if (promo.promoted) {
+            session.coHostStatus = "active";
+            await session.save();
+            coHostSwapped = true;
+          } else {
+            console.warn(`New teacher co-host promotion pending: ${promo.reason}`);
+          }
+        }
+      } catch (coHostErr) {
+        console.error("Meet co-host swap failed (non-fatal):", coHostErr.message);
+      }
+    }
+
     // Log the replacement via QAO action logger
     try {
       const { logQaoAction } = await import("../services/qao/audit.service.js");
@@ -966,6 +998,7 @@ router.put("/replacement", adminAuth, async (req, res) => {
         meetingPreserved: true,
         meetingLink: session.googleMeet?.meetingLink || session.meetingLink,
         coHostStatus: session.coHostStatus,
+        coHostSwapped,
         calendarUpdated,
         previousState,
       },

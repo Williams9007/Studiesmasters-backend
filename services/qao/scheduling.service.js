@@ -149,6 +149,25 @@ export async function createSession(data = {}) {
       // Teacher is verified and email was passed to createMeeting
       // createMeeting should have added them as attendee
       session.coHostStatus = "invited";
+
+      // Promote teacher to actual COHOST via Meet API v2 — being a Calendar
+      // attendee alone does NOT grant co-host (teachers waited in the waiting
+      // room). Members added via API also join without knocking.
+      try {
+        const { promoteTeacherToCohost } = await import("../../services/google/meet.service.js");
+        const promo = await promoteTeacherToCohost({
+          conferenceId: meeting.conferenceId,
+          meetingCode: meeting.meetingCode,
+          teacherEmail: teacherGoogleEmail,
+        });
+        session.coHostStatus = promo.promoted ? "active" : "manual_required";
+        if (!promo.promoted) {
+          console.warn(`Co-host promotion pending for session ${session._id}: ${promo.reason}`);
+        }
+      } catch (promoErr) {
+        session.coHostStatus = "manual_required";
+        console.warn(`Co-host promotion failed for session ${session._id}: ${promoErr.message}`);
+      }
     } else if (teacherWithGoogle?.googleAccountVerified && !teacherGoogleEmail) {
       // Teacher verified but no Google email stored (edge case)
       session.coHostStatus = "teacher_verified";

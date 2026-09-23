@@ -360,6 +360,32 @@ router.get("/teacher/:sessionId/join", verifyTeacher, async (req, res) => {
       });
     }
 
+    // Just-in-time co-host promotion: if the session was created before the
+    // Meet API fix (or scheduling-time promotion failed), retry here so the
+    // teacher joins as COHOST instead of waiting in the waiting room.
+    // Members added via the API also skip the knock prompt.
+    let promotion = null;
+    if (
+      teacher.googleAccountVerified &&
+      teacher.googleMeetEmail &&
+      session.coHostStatus !== "active"
+    ) {
+      try {
+        const { promoteTeacherToCohost } = await import("../services/google/meet.service.js");
+        promotion = await promoteTeacherToCohost({
+          conferenceId: session.conferenceId || session.googleMeet?.conferenceId,
+          meetingCode: session.meetingCode || session.googleMeet?.meetingCode,
+          teacherEmail: teacher.googleMeetEmail,
+        });
+        if (promotion.promoted) {
+          session.coHostStatus = "active";
+          await session.save();
+        }
+      } catch (promoErr) {
+        console.warn(`Join-time co-host promotion failed for ${session._id}: ${promoErr.message}`);
+      }
+    }
+
     // Prepare co-host instructions based on verification status and coHostStatus
     const coHostInstructions = [];
 
@@ -423,11 +449,15 @@ router.get("/teacher/:sessionId/join", verifyTeacher, async (req, res) => {
         verifiedAt: teacher.googleVerifiedAt || null,
         status: session.coHostStatus || "not_configured",
         ownerEmail: session.googleMeet?.ownerEmail || "virtualclass@studiesmasters.com",
+        promoted: promotion?.promoted || session.coHostStatus === "active",
+        promotionReason: promotion?.reason || null,
       },
       instructions: coHostInstructions,
-      workspaceNote: "Co-host permissions depend on your organization's Google Workspace settings. " +
-        "If co-host features are not available, your admin may need to enable them in the Google Admin Console " +
-        "under Apps → Google Workspace → Meet → Host permissions.",
+      workspaceNote: session.coHostStatus === "active"
+        ? "You have been added as a COHOST on this meeting via the Google Meet API — you will join directly with host controls (no waiting room)."
+        : "Co-host permissions depend on your organization's Google Workspace settings. " +
+          "If co-host features are not available, your admin may need to enable them in the Google Admin Console " +
+          "under Apps → Google Workspace → Meet → Host permissions.",
     });
   } catch (err) {
     console.error("Teacher join error:", err);
