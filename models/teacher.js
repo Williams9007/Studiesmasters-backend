@@ -38,8 +38,41 @@ const teacherSchema = new mongoose.Schema(
     ],
 
     resetToken: String,
+
+    // ---- Google Meet Co-host Fields (Phase 6E) ----
+    // Teacher's personal Google account for Meet co-host access.
+    // This is for VERIFICATION ONLY - we do NOT store refresh tokens.
+    // The teacher verifies ownership via Google OAuth Sign-In (openid scope).
+    googleMeetEmail: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      default: null,
+      match: [/^[^@]+@[^@]+\.[^@]+$/, "Invalid Google Meet email format"],
+    },
+    googleAccountVerified: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    googleVerifiedAt: {
+      type: Date,
+      default: null,
+    },
+    // Tracks the verification state for the OAuth flow
+    googleOAuthState: {
+      type: String,
+      enum: ["not_connected", "pending", "verified", "disconnected"],
+      default: "not_connected",
+    },
+
     resetTokenExpiry: Date,
   },
   { timestamps: true }
 );
+
+// ---- Indexes for Google Meet queries (Phase 6E) ----
+teacherSchema.index({ googleMeetEmail: 1 }, { unique: true, sparse: true });
+teacherSchema.index({ email: 1, googleMeetEmail: 1 });
+
 export default mongoose.models.Teacher || mongoose.model("Teacher", teacherSchema);

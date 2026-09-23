@@ -20,6 +20,7 @@ import Timetable from "../models/Timetable.js";
 // Middleware
 import { verifyTurnstile } from "../middleware/verifyTurnstile.js";
 import { createPasswordResetToken, hashPasswordResetToken, sendPasswordResetEmail } from "../utils/passwordReset.js";
+import { adminAuth } from "../middleware/adminAuth.js";
 
 // Initialize Router ONCE
 const router = express.Router();
@@ -451,8 +452,7 @@ router.get("/:id/students", async (req, res) => {
 /**
  * GET /api/teachers/:id/timetable
  * This week's classes (Mon–Sun) where the teacher is the main teacher OR the
- * substitute — all statuses, so the dashboard calendar shows the full week
- * including the dummy test classes (group code DUMMY-…).
+ * substitute — all statuses, so the dashboard calendar shows the full week.
  */
 router.get("/:id/timetable", async (req, res) => {
   try {
@@ -772,6 +772,210 @@ router.delete("/:id/notifications", async (req, res) => {
   } catch (err) {
     console.error("Clear teacher notifications error:", err);
     res.status(500).json({ success: false, message: "Failed to clear notifications" });
+  }
+});
+
+// ---- Admin: Set Teacher Google Account (Phase 6E) ----
+// PUT /api/teachers/:id/google-account
+// Admin endpoint to set/verify a teacher's Google Meet email
+// This is used when an admin wants to pre-set a teacher's Google email
+// before the teacher completes OAuth verification.
+
+/**
+ * PUT /api/teachers/:id/google-account
+ * Admin sets a teacher's Google Meet email (pre-verification setup).
+ * The teacher still needs to verify via OAuth, but this sets the expected email.
+ */
+router.put("/:id/google-account", adminAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { googleMeetEmail } = req.body;
+
+    if (!googleMeetEmail || typeof googleMeetEmail !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "googleMeetEmail is required and must be a string",
+      });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^@]+@[^@]+\.[^@]+$/;
+    if (!emailRegex.test(googleMeetEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid email format",
+      });
+    }
+
+    // Find teacher
+    const teacher = await Teacher.findById(id);
+    if (!teacher) {
+      return res.status(404).json({
+        success: false,
+        message: "Teacher not found",
+      });
+    }
+
+    // Update teacher's Google account info
+    const update = {
+      googleMeetEmail: googleMeetEmail.toLowerCase().trim(),
+      googleOAuthState: "pending", // Reset to pending for re-verification
+    };
+
+    // If the email matches what the teacher will verify, we can mark as pre-verified
+    // But actual verification still requires OAuth flow
+    await Teacher.findByIdAndUpdate(id, {
+      $set: update,
+    });
+
+    res.json({
+      success: true,
+      message: "Google Meet email set. Teacher must still verify via OAuth.",
+      data: {
+        googleMeetEmail: update.googleMeetEmail,
+        googleOAuthState: update.googleOAuthState,
+        note: "Teacher needs to complete OAuth verification to use co-host features",
+      },
+    });
+  } catch (err) {
+    console.error("Admin set teacher Google account error:", err);
+    res.status(500).json({
+      success: false,
+      message: err.message || "Failed to set teacher Google account",
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Teacher Replacement Endpoint (Phase 6.8) - Admin only
+// PUT /api/teachers/replacement
+// Replaces a teacher in a class session, updating co-host assignment
+// ---------------------------------------------------------------------------
+/**
+ * PUT /api/teachers/replacement
+ * Replace teacher in a class session (e.g., teacher leaving, sick leave).
+ * Updates ClassSession, Google Calendar attendees, and preserves meeting link/recording.
+ */
+router.put("/replacement", adminAuth, async (req, res) => {
+  try {
+    const { sessionId, oldTeacherId, newTeacherId } = req.body;
+
+    if (!sessionId || !oldTeacherId || !newTeacherId) {
+      return res.status(400).json({
+        success: false,
+        message: "sessionId, oldTeacherId, and newTeacherId are required",
+      });
+    }
+
+    // Fetch both teachers
+    const [session, oldTeacher, newTeacher] = await Promise.all([
+      ClassSession.findById(sessionId),
+      Teacher.findById(oldTeacherId),
+      Teacher.findById(newTeacherId),
+    ]);
+
+    if (!session) {
+      return res.status(404).json({ success: false, message: "Class session not found" });
+    }
+    if (!oldTeacher) {
+      return res.status(404).json({ success: false, message: "Old teacher not found" });
+    }
+    if (!newTeacher) {
+      return res.status(404).json({ success: false, message: "New teacher not found" });
+    }
+
+    // Store previous state for audit
+    const previousState = {
+      teacher: session.teacher,
+      teacherEmail: session.googleMeet?.teacherEmail,
+      coHostStatus: session.coHostStatus,
+    };
+
+    // Update the session teacher
+    session.teacher = newTeacherId;
+    session.originalTeacher = oldTeacherId; // preserve history
+    const newEmail = newTeacher.googleMeetEmail || null;
+
+    // Update googleMeet teacher info
+    if (session.googleMeet) {
+      session.googleMeet.teacherEmail = newEmail;
+    }
+
+    // Update co-host status based on new teacher's verification
+    if (newTeacher.googleAccountVerified && newEmail) {
+      session.coHostStatus = "invited";
+    } else {
+      session.coHostStatus = "manual_required";
+    }
+
+    await session.save();
+
+    // Update Google Calendar attendees if event exists
+    let calendarUpdated = false;
+    if (session.googleMeet?.calendarEventId) {
+      try {
+        const { updateMeetingAttendees } = await import("../services/google/calendar-attendee.service.js");
+        await updateMeetingAttendees({
+          calendarEventId: session.googleMeet.calendarEventId,
+          oldTeacherEmail: oldTeacher.googleMeetEmail,
+          newTeacherEmail: newEmail,
+        });
+        calendarUpdated = true;
+      } catch (calendarErr) {
+        console.error("Calendar attendee update failed:", calendarErr.message);
+        // Don't fail the request - mark as partial success
+      }
+    }
+
+    // Log the replacement via QAO action logger
+    try {
+      const { logQaoAction } = await import("../services/qao/audit.service.js");
+      await logQaoAction({
+        action: "TEACHER_REPLACED",
+        resource: "ClassSession",
+        resourceId: sessionId,
+        details: {
+          oldTeacher: String(oldTeacherId),
+          oldTeacherEmail: oldTeacher.googleMeetEmail,
+          newTeacher: String(newTeacherId),
+          newTeacherEmail: newEmail,
+          calendarEventId: session.googleMeet?.calendarEventId,
+          calendarUpdated,
+          coHostStatus: session.coHostStatus,
+        },
+      });
+    } catch (logErr) {
+      console.error("Audit log failed:", logErr.message);
+    }
+
+    res.json({
+      success: true,
+      message: "Teacher replaced successfully",
+      data: {
+        sessionId: session._id,
+        oldTeacher: {
+          id: oldTeacherId,
+          name: oldTeacher.fullName,
+          email: oldTeacher.googleMeetEmail,
+        },
+        newTeacher: {
+          id: newTeacherId,
+          name: newTeacher.fullName,
+          email: newTeacher.googleMeetEmail,
+        },
+        meetingPreserved: true,
+        meetingLink: session.googleMeet?.meetingLink || session.meetingLink,
+        coHostStatus: session.coHostStatus,
+        calendarUpdated,
+        previousState,
+      },
+    });
+  } catch (err) {
+    console.error("Teacher replacement error:", err);
+    res.status(500).json({
+      success: false,
+      message: err.message || "Failed to replace teacher",
+    });
   }
 });
 

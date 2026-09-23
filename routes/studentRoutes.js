@@ -382,8 +382,9 @@ router.get("/notifications/:studentId/unread-count", async (req, res) => {
 /**
  * GET /api/students/:studentId/timetable
  * This week's classes (Mon–Sun) for every class group the student is enrolled
- * in — all statuses, so the dashboard calendar shows upcoming, live,
- * completed AND the dummy test classes (group code DUMMY-…).
+ * in — all statuses, so the dashboard calendar shows upcoming, live and
+ * completed sessions. The Google Meet link is delivered to the student through
+ * their Moodle calendar (see services/moodle/syncTimetable.js), not here.
  */
 router.get("/:studentId/timetable", async (req, res) => {
   try {

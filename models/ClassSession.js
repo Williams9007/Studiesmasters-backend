@@ -84,6 +84,43 @@ const classSessionSchema = new mongoose.Schema(
       default: "pending",
       index: true,
     },
+    // ---- Google Meet Co-host Tracking (Phase 6E - Enhanced) ----
+    // Tracks the co-host assignment state for the teacher's Google account.
+    // Note: Co-host permissions are controlled by Google Workspace settings,
+    // not by this field. This is for tracking and UI purposes only.
+    coHostStatus: {
+      type: String,
+      enum: [
+        "not_configured",      // Teacher has not connected Google account
+        "teacher_verified",    // Teacher Google identity verified via OAuth
+        "invited",             // Teacher Google email added to meeting attendee list
+        "active",              // Teacher successfully has meeting control (co-host)
+        "manual_required"      // Google Workspace requires manual co-host assignment
+      ],
+      default: "not_configured",
+      index: true,
+    },
+    // Google Meet metadata (expanded from existing flat fields for clarity)
+    googleMeet: {
+      // The meeting owner (always the company account)
+      ownerEmail: {
+        type: String,
+        trim: true,
+        default: "virtualclass@studiesmasters.com",
+      },
+      // The teacher's verified Google email (for co-host access)
+      teacherEmail: {
+        type: String,
+        trim: true,
+        lowercase: true,
+        default: null,
+      },
+      // Existing meeting fields (kept for backward compatibility)
+      meetingLink: { type: String, trim: true, default: "" },
+      meetingCode: { type: String, trim: true, default: "" },
+      conferenceId: { type: String, trim: true, default: "" },
+      calendarEventId: { type: String, trim: true, default: "" },
+    },
     // Per-student join/leave/duration. Used to compute attendance reports.
     // The client (or the teacher/QAO correction flow) writes these records.
     attendance: [

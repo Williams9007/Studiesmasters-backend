@@ -98,10 +98,22 @@ export async function createSession(data = {}) {
   }
 
   // ---- Automatic Google Meet generation (graceful, never blocks creation) --
+  // Resolve the teacher's Google Meet (co-host) email. It is only used when the
+  // teacher has COMPLETED Google verification (googleAccountVerified), so an
+  // unverified address is never attached to a company-owned calendar event.
+  const teacherWithGoogle = await Teacher.findById(teacher)
+    .select("googleMeetEmail googleAccountVerified")
+    .lean();
+  const teacherGoogleEmail =
+    teacherWithGoogle?.googleAccountVerified && teacherWithGoogle?.googleMeetEmail
+      ? teacherWithGoogle.googleMeetEmail
+      : null;
+
   const meeting = await createMeeting({
     subject: group.subject || "",
     grade: group.grade || "",
     teacherName: teacherDoc.fullName || "",
+    teacherEmail: teacherGoogleEmail,
     date: session.date,
     startTime: session.startTime,
     endTime: session.endTime,
@@ -114,9 +126,55 @@ export async function createSession(data = {}) {
     session.conferenceId = meeting.conferenceId || "";
     session.calendarEventId = meeting.calendarEventId || "";
     session.meetingStatus = meeting.meetingStatus || "pending";
-    await session.save();
+
+    // Store Google Meet co-host tracking info
+    session.googleMeet = {
+      ownerEmail: "virtualclass@studiesmasters.com",
+      teacherEmail: teacherGoogleEmail,
+      meetingLink: meeting.meetingLink,
+      meetingCode: meeting.meetingCode || "",
+      conferenceId: meeting.conferenceId || "",
+      calendarEventId: meeting.calendarEventId || "",
+    };
+
+        // Set co-host status based on teacher verification
+    // New status values:
+    //   - not_configured: Teacher has not connected Google account
+    //   - teacher_verified: Teacher has verified Google account but not yet invited
+    //   - invited: Teacher Google email added to meeting attendee list
+    //   - active: Teacher successfully has meeting control
+    //   - manual_required: Google Workspace requires manual co-host assignment
+    
+    if (teacherWithGoogle?.googleAccountVerified && teacherGoogleEmail) {
+      // Teacher is verified and email was passed to createMeeting
+      // createMeeting should have added them as attendee
+      session.coHostStatus = "invited";
+    } else if (teacherWithGoogle?.googleAccountVerified && !teacherGoogleEmail) {
+      // Teacher verified but no Google email stored (edge case)
+      session.coHostStatus = "teacher_verified";
+    } else {
+      // Teacher has not connected Google account
+      session.coHostStatus = "not_configured";
+    }
+
+            await session.save();
+
+    // Automatic Moodle sync - push the new session to Moodle calendar
+    try {
+      const { syncClassSession, CLASS_SYNC_ACTIONS } = await import("../moodle/syncClass.js");
+      await syncClassSession(session.toObject(), {
+        action: meeting.meetingStatus === "ready" ? CLASS_SYNC_ACTIONS.MEETING_READY : CLASS_SYNC_ACTIONS.CREATED,
+        sessionId: session._id,
+      }).catch(() => {});
+    } catch (syncErr) {
+      console.error("Moodle auto-sync failed for new session:", syncErr.message);
+    }
   } else if (session.meetingStatus !== "ready") {
     session.meetingStatus = "pending";
+    // Ensure coHostStatus reflects the teacher's actual state even if meeting failed
+    session.coHostStatus = teacherWithGoogle?.googleAccountVerified && teacherGoogleEmail
+      ? "teacher_verified"
+      : "not_configured";
     await session.save();
   }
 

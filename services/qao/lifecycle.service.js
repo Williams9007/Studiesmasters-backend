@@ -236,6 +236,45 @@ async function checkPlanExpiry(now = new Date()) {
   } catch { return 0; }
 }
 
+// ── Automatic Moodle sync for class sessions ───────────────────────────────────
+// Syncs sessions to Moodle's native calendar on every lifecycle tick.
+// Only syncs sessions that haven't been synced yet or have changed since last sync.
+
+const moodleSyncState = new Map(); // sessionId -> lastSyncTimestamp
+
+/**
+ * Check if a session needs Moodle sync and perform it if needed.
+ */
+async function syncSessionToMoodleIfNeeded(session, now) {
+  try {
+    if (!session || !session.meetingLink) return false;
+    if (!["scheduled", "live"].includes(session.status)) return false;
+
+    const sessionId = String(session._id);
+    const lastSync = moodleSyncState.get(sessionId);
+
+    const meetingReadyChanged = session.meetingStatus === "ready" && (!lastSync || session.updatedAt > lastSync);
+    const needsCatchup = !lastSync || (now.getTime() - lastSync) > 10 * 60 * 1000;
+
+    if (!meetingReadyChanged && !needsCatchup) return false;
+
+    const action = session.meetingStatus === "ready"
+      ? CLASS_SYNC_ACTIONS.MEETING_READY
+      : CLASS_SYNC_ACTIONS.UPDATED;
+
+    const result = await syncClassSession(session, { action, sessionId });
+    moodleSyncState.set(sessionId, now.getTime());
+
+    if (result.synced) {
+      logger.info(`[MOODLE-AUTO] Synced ${sessionId} - ${action}`);
+    }
+    return true;
+  } catch (err) {
+    logger.warn(`[MOODLE-AUTO] Failed to sync session ${session?._id}: ${err.message}`);
+    return false;
+  }
+}
+
 /** One scheduler pass. Safe to call repeatedly; every step is non-fatal. */
 export async function runLifecycleTick() {
   const now = new Date();
@@ -256,11 +295,16 @@ export async function runLifecycleTick() {
     .lean();
 
   let transitions = 0;
+  let moodleSynced = 0;
   for (const s of sessions) {
     const mutable = await ClassSession.findById(s._id);
     if (!mutable) continue;
     const until = minutesUntilStart(s, now);
     const sinceEnd = minutesSinceEnd(s, now);
+
+    // Auto-sync to Moodle (new automatic behavior)
+    const synced = await syncSessionToMoodleIfNeeded(s, now);
+    if (synced) moodleSynced++;
 
     if (mutable.status === "scheduled") {
       if (until <= 24 * 60 && until > 60) await remind({ session: s, kind: "day-before", minutesLabel: "24 hours" });
@@ -271,7 +315,7 @@ export async function runLifecycleTick() {
       if (sinceEnd >= 0) { await goCompleted(mutable); transitions++; }
     }
   }
-  return { checked: sessions.length, transitions, expiryAlerts: await checkPlanExpiry(now) };
+  return { checked: sessions.length, transitions, moodleSynced, expiryAlerts: await checkPlanExpiry(now) };
 }
 
 let schedulerStarted = false;

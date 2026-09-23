@@ -331,6 +331,110 @@ router.post("/teacher/:sessionId/regenerate", verifyTeacher, async (req, res) =>
   }
 });
 
+// ---- Teacher Co-host Join Endpoint (Phase 6E) ----
+// GET /api/meet/teacher/:sessionId/join
+// Returns the meeting link with co-host instructions for the teacher.
+// This is the primary endpoint teachers use to join their live class.
+router.get("/teacher/:sessionId/join", verifyTeacher, async (req, res) => {
+  try {
+    const teacherId = req.user._id;
+    const session = await loadSession(req.params.sessionId);
+
+    // Verify teacher is assigned to this session
+    const isAssigned =
+      String(session.teacher?._id || "") === String(teacherId) ||
+      String(session.substituteTeacher?._id || "") === String(teacherId);
+    if (!isAssigned) {
+      return res.status(403).json({ success: false, message: "You are not assigned to this class" });
+    }
+
+    // Check if teacher's Google account is verified for co-host access
+    const teacher = await Teacher.findById(teacherId).select(
+      "googleMeetEmail googleAccountVerified googleVerifiedAt fullName email"
+    );
+
+    if (!session.meetingLink) {
+      return res.status(400).json({
+        success: false,
+        message: "Meeting link not available. Please contact support or try regenerating the meeting.",
+      });
+    }
+
+    // Prepare co-host instructions based on verification status and coHostStatus
+    const coHostInstructions = [];
+
+    if (teacher.googleAccountVerified && teacher.googleMeetEmail) {
+      coHostInstructions.push(
+        "Sign in to Google Meet with your verified Google account: " + teacher.googleMeetEmail
+      );
+      coHostInstructions.push(
+        "Your Google account is verified and listed as an attendee on this meeting."
+      );
+      coHostInstructions.push(
+        `Meeting co-host status: ${session.coHostStatus || "invited"}`
+      );
+      
+      if (session.coHostStatus === "invited") {
+        coHostInstructions.push(
+          "You have been invited as a meeting attendee. Google Meet will attempt to grant you co-host controls based on Workspace settings."
+        );
+      } else if (session.coHostStatus === "manual_required") {
+        coHostInstructions.push(
+          "If you don't see co-host controls automatically, you may need to request them from the meeting host or your administrator."
+        );
+      }
+    } else {
+      coHostInstructions.push(
+        "For co-host access, please connect your Google account in your dashboard settings."
+      );
+      coHostInstructions.push(
+        "Click 'Connect Google Account' in your teacher dashboard to verify your Google identity."
+      );
+    }
+
+    coHostInstructions.push(
+      "Join the meeting using the link below. Google Meet will recognize your account."
+    );
+    coHostInstructions.push(
+      "Co-host permissions (admit students, mute/remove participants, share screen, record) " +
+      "are managed by your organization's Google Workspace settings. " +
+      "If co-host features are not available, your admin may need to enable them in the Google Admin Console."
+    );
+
+    res.json({
+      success: true,
+      session: {
+        sessionId: session._id,
+        subject: session.classGroup?.subject || "",
+        grade: session.classGroup?.grade || "",
+        date: session.date,
+        startTime: session.startTime,
+        endTime: session.endTime,
+        status: session.status,
+      },
+      meeting: {
+        link: session.meetingLink,
+        code: session.meetingCode || "",
+        conferenceId: session.conferenceId || "",
+      },
+      coHost: {
+        email: teacher.googleMeetEmail || null,
+        verified: teacher.googleAccountVerified || false,
+        verifiedAt: teacher.googleVerifiedAt || null,
+        status: session.coHostStatus || "not_configured",
+        ownerEmail: session.googleMeet?.ownerEmail || "virtualclass@studiesmasters.com",
+      },
+      instructions: coHostInstructions,
+      workspaceNote: "Co-host permissions depend on your organization's Google Workspace settings. " +
+        "If co-host features are not available, your admin may need to enable them in the Google Admin Console " +
+        "under Apps → Google Workspace → Meet → Host permissions.",
+    });
+  } catch (err) {
+    console.error("Teacher join error:", err);
+    res.status(err.statusCode || 500).json({ success: false, message: err.message });
+  }
+});
+
 // Attendance list for the teacher's own class.
 router.get("/teacher/:sessionId/attendance", verifyTeacher, async (req, res) => {
   try {

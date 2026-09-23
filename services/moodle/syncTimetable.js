@@ -69,17 +69,24 @@ function sessionTimes(session) {
   return { timestart: Math.floor(start.getTime() / 1000), timeduration };
 }
 
+/** Resolve the Google Meet link for a session (top-level or googleMeet sub-doc). */
+function resolveMeetingLink(session) {
+  const link = session?.meetingLink || session?.googleMeet?.meetingLink || "";
+  return typeof link === "string" ? link.trim() : "";
+}
+
 function eventBody(session) {
   const t = sessionTimes(session);
   if (!t) return null;
   const groupId = String(session._id || session.sessionId || "");
   const teacher = session.teacher?.fullName || session.teacher?.name || "Teacher TBA";
+  const meetingLink = resolveMeetingLink(session);
   const description = [
     `<p><b>${session.classGroup?.subject || session.subject || "Class"}</b> · ${session.classGroup?.grade || session.grade || ""}</p>`,
     `<p>${new Date(session.date).toLocaleDateString("en-GB", { timeZone: "UTC", day: "numeric", month: "short", year: "numeric" })} · ${session.startTime}–${session.endTime}</p>`,
     `<p>Tutor: ${teacher}</p>`,
-    session.meetingLink
-      ? `<p><a href="${session.meetingLink}">Join Virtual Class</a></p>`
+    meetingLink
+      ? `<p><a href="${meetingLink}">Join Virtual Class</a></p>`
       : `<p>The meeting link will appear here once the tutor starts the class.</p>`,
   ].join("");
   return {

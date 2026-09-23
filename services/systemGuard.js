@@ -238,6 +238,7 @@ const BYPASS_PATHS = [
   "/api/students", // Student routes (payment-summary, etc.)
   "/api/moodle", // Moodle SSO routes are JWT-protected via studentAuth/verifyTeacher
   "/api/google/oauth", // Google OAuth callback (external callback from Google, no JWT possible)
+  "/api/google/teacher", // Teacher Google OAuth callback (external callback from Google, no JWT possible)
   "/api/system-guard", // System guard dashboard routes
   "/api/system", // System guard unblock/block API endpoints (must be accessible even when IP is blocked)
   "/system-guard.html",

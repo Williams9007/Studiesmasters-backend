@@ -1,3 +1,7 @@
-node_modules
-.env
-.deploy-registration-fix/`n# Debug / temp files`n*.txt`nlogs/`nnul.out
+node_modules 
+.env 
+.deploy-registration-fix/ 
+*.txt 
+logs/ 
+nul.out 
+validate-jsx.mjs

@@ -74,6 +74,7 @@ import contactRoutes from "./routes/contactRoutes.js";
 import moodleRoutes from "./routes/moodleRoutes.js";
 import meetRoutes from "./routes/meetRoutes.js";
 import googleRoutes from "./routes/googleRoutes.js";
+import googleTeacherRoutes from "./routes/googleTeacherRoutes.js";
 import recordingRoutes from "./routes/recordingRoutes.js";
 import streamRoutes from "./routes/streamRoutes.js";
 
@@ -253,6 +254,7 @@ app.use("/api/contact", contactRoutes);
 app.use("/api/moodle", moodleRoutes);
 app.use("/api/meet", meetRoutes);
 app.use("/api/google/oauth", googleRoutes);
+app.use("/api/google/teacher", googleTeacherRoutes);
 app.use("/api/recordings", recordingRoutes);
 app.use("/api/stream", streamRoutes);
 

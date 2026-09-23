@@ -9,9 +9,9 @@
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
-    "express": "^5.1.0",
     "express-mongo-sanitize": "^2.2.0",
     "express-rate-limit": "^8.6.1",
+    "google-auth-library": "^9.15.1",
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.19.3",
@@ -38,6 +38,13 @@
     "test:sso": "node scripts/sso-self-test.js",
     "test:notify": "node scripts/notify-self-test.js",
     "test:notify-socket": "node scripts/notify-socket-e2e.js",
-    "seed:dummy-timetable": "node scripts/seed-dummy-timetable-notifications.js"
+    "seed:dummy-timetable": "node scripts/seed-real-classes.js",
+    "seed:real-classes": "node scripts/seed-real-classes.js",
+    "seed:cleanup": "node scripts/seed-real-classes.js --cleanup",
+    "backfill:google-meet": "node scripts/backfill-google-meet.js",
+    "inspect:cohost": "node scripts/inspect-cohost-data.js",
+    "verify:moodle-meet": "node scripts/verify-moodle-meet-link.js",
+    "test:acceptance": "node scripts/acceptance-cohost-moodle.js",
+    "cleanup:test-artifacts": "node scripts/cleanup-test-artifacts.js"
   }
 }
