@@ -147,7 +147,15 @@ check("plugin uses native theme header/footer", plugin.includes("$OUTPUT->header
 check("plugin registers css via requires->css (no raw link echo)", plugin.includes("requires->css") && !/echo '<link rel=/.test(plugin));
 const vclassVersionPhp = read(path.join(root, "..", "moodle-sso", "local", "studiesmasters_virtualclass", "version.php"));
 const vclassVersion = Number((vclassVersionPhp.match(/\$plugin->version\s*=\s*(\d+)/) || [])[1] || 0);
-check(`plugin version >= 2026092302 for redeploy (got ${vclassVersion})`, vclassVersion >= 2026092302);
+check(`plugin version >= 2026092303 for redeploy (got ${vclassVersion})`, vclassVersion >= 2026092303);
+
+// ------------------------------------------- Nav drawer entry point (lib.php)
+console.log("\n[13] vclass: nav drawer entry point (lib.php callback)");
+const vclassLib = read(path.join(root, "..", "moodle-sso", "local", "studiesmasters_virtualclass", "lib.php"));
+check("lib.php defines the extend_navigation callback", /function local_studiesmasters_virtualclass_extend_navigation\(global_navigation \$navigation\)/.test(vclassLib));
+check("lib.php is Moodle-guarded", vclassLib.includes("defined('MOODLE_INTERNAL') || die"));
+check("nav link targets the plugin index with pluginname string", vclassLib.includes("get_string('pluginname', 'local_studiesmasters_virtualclass')") && vclassLib.includes("/local/studiesmasters_virtualclass/index.php"));
+check("nav hidden for non-SSO accounts (sm_s_/sm_t_ only)", vclassLib.includes("sm_t_") && vclassLib.includes("sm_s_"));
 
 console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
 process.exitCode = fail ? 1 : 0;
