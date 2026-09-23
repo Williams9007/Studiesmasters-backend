@@ -29,7 +29,7 @@ export async function syncMainWebsiteName({ email, req = null } = {}) {
   try {
     const [s, t] = await Promise.all([
       Student.findOne({ email: mail }).select("fullName name").lean(),
-      Teacher.findOne({ email: mail }).select("fullName").lean(),
+      Teacher.findOne({ email: mail }).select("fullName name").lean(),
     ]);
     student = s;
     teacher = t;
@@ -45,6 +45,8 @@ export async function syncMainWebsiteName({ email, req = null } = {}) {
     fullName = student.name;
   } else if (teacher?.fullName) {
     fullName = teacher.fullName;
+  } else if (teacher?.name) {
+    fullName = teacher.name;
   }
 
   logger.info(`[MAIN-WEBSITE-SYNC] name for ${mail}: ${fullName || "(not found)"}`);

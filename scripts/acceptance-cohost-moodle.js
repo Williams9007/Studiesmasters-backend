@@ -157,5 +157,21 @@ check("lib.php is Moodle-guarded", vclassLib.includes("defined('MOODLE_INTERNAL'
 check("nav link targets the plugin index with pluginname string", vclassLib.includes("get_string('pluginname', 'local_studiesmasters_virtualclass')") && vclassLib.includes("/local/studiesmasters_virtualclass/index.php"));
 check("nav hidden for non-SSO accounts (sm_s_/sm_t_ only)", vclassLib.includes("sm_t_") && vclassLib.includes("sm_s_"));
 
+// ------------------------------------------- SSO name sync (main-website names)
+console.log("\n[14] SSO login refreshes names from verify fullName + legacy name");
+const ssoPlugin = read(path.join(root, "..", "moodle-sso", "local", "studiesmasters_sso", "sso.php"));
+const ssoCode = ssoPlugin.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+check("sso 5b reads verify profile.fullName (no separate firstname/lastname keys)",
+  ssoCode.includes("$backendProfile['profile']['fullName']") && !ssoCode.includes("['profile']['firstname']"));
+check("sso 5b refreshes existing users (no create-only gating)",
+  ssoPlugin.includes("name edits on the main website propagate"));
+check("sso 4a normalises blank fullName to absent (never blanks a name)",
+  ssoPlugin.includes("unset($backendProfile['profile']['fullName'])"));
+check("main-website name endpoint tolerates legacy teacher name field",
+  read(path.join(root, "services", "moodle", "syncMainWebsiteName.js")).includes('select("fullName name")'));
+const ssoVersionPhp = read(path.join(root, "..", "moodle-sso", "local", "studiesmasters_sso", "version.php"));
+const ssoVersion = Number((ssoVersionPhp.match(/\$plugin->version\s*=\s*(\d+)/) || [])[1] || 0);
+check(`sso plugin version >= 2026092304 for redeploy (got ${ssoVersion})`, ssoVersion >= 2026092304);
+
 console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
 process.exitCode = fail ? 1 : 0;
