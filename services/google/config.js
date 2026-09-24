@@ -28,6 +28,12 @@ export const config = {
   clientId: asString(process.env.GOOGLE_CLIENT_ID),
   clientSecret: asString(process.env.GOOGLE_CLIENT_SECRET),
   redirectUri: asString(process.env.GOOGLE_REDIRECT_URI),
+  // Teacher verification has a separate callback; using the company callback
+  // would make Google send teacher states to the company OAuth handler.
+  teacherRedirectUri: asString(
+    process.env.GOOGLE_TEACHER_REDIRECT_URI,
+    asString(process.env.GOOGLE_REDIRECT_URI).replace(/\/api\/google\/oauth\/callback\/?$/, "/api/google/teacher/callback")
+  ),
   projectId: asString(process.env.GOOGLE_PROJECT_ID),
 
   // Service account JSON key material (optional; used for domain-wide delegation).

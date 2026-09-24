@@ -26,7 +26,7 @@ const TEACHER_SCOPES = ["openid", "email", "profile"].join(" ");
 const oauth2Client = new OAuth2Client(
   config.clientId,
   config.clientSecret,
-  config.redirectUri
+  config.teacherRedirectUri
 );
 
 /**
@@ -169,7 +169,7 @@ export async function initiateTeacherVerification(teacherId) {
     },
   });
 
-  const consentUrl = buildTeacherConsentUrl(state, config.redirectUri);
+  const consentUrl = buildTeacherConsentUrl(state, config.teacherRedirectUri);
 
   return {
     state,
