@@ -19,6 +19,14 @@ const isTrue = (v, fallback = false) => {
   return ["1", "true", "yes", "on"].includes(String(v).trim().toLowerCase());
 };
 
+const normaliseScopes = (value, fallback) => {
+  const raw = String(value ?? fallback).trim();
+  // Render users sometimes paste `GOOGLE_SCOPES=...` into the value field.
+  // Strip the accidental key prefix and retain only actual OAuth scope URLs.
+  const cleaned = raw.replace(/^\s*GOOGLE_SCOPES\s*=\s*/i, "");
+  return cleaned.split(/\s+/).filter((scope) => /^https:\/\//.test(scope)).join(" ");
+};
+
 export const config = {
   // Master switch. When false the Google layer is treated as "not configured"
   // and scheduling falls back to "meeting pending" (never blocks class creation).
@@ -55,7 +63,7 @@ export const config = {
   // Meet API v2 (POST /v2/spaces/{space}/members). Tokens issued BEFORE this
   // scope was added will keep the old grant until re-consented (re-connect the
   // company Google account once after deploying this change).
-  scopes: asString(
+  scopes: normaliseScopes(
     process.env.GOOGLE_SCOPES,
     "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/meetings.space.created openid"
   ),
