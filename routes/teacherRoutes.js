@@ -65,7 +65,11 @@ router.post("/login", verifyTurnstile, async (req, res) => {
       return res.status(500).json({ message: "Server configuration error (JWT secret not set)." });
     }
 
-    const token = jwt.sign({ id: teacher._id, role: "teacher" }, process.env.JWT_SECRET, { expiresIn: "7d" });
+    const token = jwt.sign(
+      { id: teacher._id, role: "teacher", email: teacher.email },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
     const user = {
       _id: teacher._id,
       fullName: teacher.fullName || teacher.name,
@@ -241,16 +245,22 @@ router.post("/quizzes/class-group", async (req, res) => {
 
 router.get("/:id/subjects", async (req, res) => {
   try {
-    const teacher = await Teacher.findById(req.params.id).select("subjectsTeaching curriculum");
+    // `subjectsTeaching` is an array of ObjectId refs. Selecting it WITHOUT
+    // populating returned raw ids, so the teacher dashboard (and the timetable
+    // upload dropdown) rendered a blank subject name for every assigned subject.
+    const teacher = await Teacher.findById(req.params.id)
+      .select("subjectsTeaching curriculum")
+      .populate("subjectsTeaching", "name curriculum grade package price moodleCourseId");
     if (!teacher) return res.status(404).json({ message: "Teacher not found" });
 
     // If subjectsTeaching is populated, return it
     if (teacher.subjectsTeaching && teacher.subjectsTeaching.length > 0) {
-      return res.json(teacher.subjectsTeaching);
+      // Defensive: an id whose Subject document was deleted populates to null.
+      return res.json(teacher.subjectsTeaching.filter(Boolean));
     }
 
     // Fallback: try to get subjects from Subject collection where teacherId matches
-    const subjects = await Subject.find({ teacherId: req.params.id }).select("name grade package").lean();
+    const subjects = await Subject.find({ teacherId: req.params.id }).select("name grade package curriculum price moodleCourseId").lean();
     if (subjects.length > 0) {
       return res.json(subjects.map(s => ({ ...s, _id: s._id || s.name })));
     }

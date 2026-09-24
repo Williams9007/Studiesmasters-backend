@@ -11,8 +11,14 @@ export const verifyTeacher = async (req, res, next) => {
     const token = authHeader.split(" ")[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    const teacher = await Teacher.findById(decoded.id);
-    if (!teacher) return res.status(403).json({ message: "Access denied" });
+    // New tokens carry the email as a migration-safe fallback. The ID remains
+    // the primary lookup; email is only used when a legacy token's ID no longer
+    // maps to a teacher document.
+    const teacher = await Teacher.findById(decoded.id)
+      || (decoded.email ? await Teacher.findOne({ email: String(decoded.email).toLowerCase() }) : null);
+    if (!teacher || decoded.role !== "teacher") {
+      return res.status(403).json({ message: "Access denied" });
+    }
 
     req.user = teacher;
     next();
