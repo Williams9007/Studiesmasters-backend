@@ -389,9 +389,17 @@ router.get("/notifications/:studentId/unread-count", async (req, res) => {
 router.get("/:studentId/timetable", async (req, res) => {
   try {
     const { studentId } = req.params;
-    const groups = await ClassGroup.find({ students: studentId }).select("_id").lean();
+    const groups = await ClassGroup.find({ students: studentId })
+      .select("_id code subject grade curriculum")
+      .lean();
     const groupIds = groups.map((g) => g._id);
-    if (!groupIds.length) return res.json({ success: true, timetable: [] });
+    if (!groupIds.length) {
+      return res.json({
+        success: true,
+        timetable: [],
+        classGroups: [],
+      });
+    }
 
     const now = new Date();
     const monday = new Date(now);
@@ -411,6 +419,7 @@ router.get("/:studentId/timetable", async (req, res) => {
 
     res.json({
       success: true,
+      classGroups: groups,
       timetable: sessions.map((s) => ({
         id: s._id,
         date: s.date,
