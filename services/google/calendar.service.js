@@ -89,6 +89,13 @@ export async function createCalendarEvent({
       },
     },
     attendees: attendees.map((email) => ({ email })),
+    reminders: {
+      useDefault: false,
+      overrides: [
+        { method: "popup", minutes: 30 },
+        { method: "popup", minutes: 10 },
+      ],
+    },
     guestsCanModify: false,
   };
 
@@ -98,7 +105,7 @@ export async function createCalendarEvent({
     // conferenceData.createRequest and provision the Google Meet link.
     // Without it the API silently creates a plain event with no conference,
     // which surfaces as GOOGLE_NO_MEET_LINK below (verified live).
-    res = await fetch(`${config.calendarBaseUrl}/calendars/primary/events?conferenceDataVersion=1`, {
+    res = await fetch(`${config.calendarBaseUrl}/calendars/primary/events?conferenceDataVersion=1&sendUpdates=all`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
@@ -134,10 +141,11 @@ export async function createCalendarEvent({
 
   const uri = entryPoint.uri.replace(/\/$/, "");
   const meetingCode = uri.split("/").pop() || generateMeetingCode();
+  const conferenceId = data.conferenceData?.conferenceId || "";
   return {
     meetingLink: uri,
     meetingCode,
-    conferenceId: data.id || `gc-${meetingCode}`,
+    conferenceId,
     calendarEventId: data.id || null,
     mock: false,
   };

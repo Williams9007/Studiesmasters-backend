@@ -109,8 +109,9 @@ const MEET_API_BASE = "https://meet.googleapis.com/v2";
  * the Meet API space name is spaces/{name}. We probe both candidates.
  */
 async function resolveSpaceName(token, { conferenceId, meetingCode }) {
-  const candidates = [];
-  if (conferenceId) candidates.push(`spaces/${conferenceId}`);
+  if (!conferenceId) return null;
+
+  const candidates = [`spaces/${conferenceId}`];
   if (meetingCode) candidates.push(`spaces/${meetingCode.replace(/-/g, "")}`);
   if (meetingCode) candidates.push(`spaces/${meetingCode}`);
 
@@ -141,7 +142,13 @@ export async function promoteTeacherToCohost({ conferenceId, meetingCode, teache
       process.env.GOOGLE_MEET_OWNER_EMAIL || "virtualclass@studiesmasters.com";
     const token = await tokenMod.getAccessToken({ email: ownerEmail });
 
-    const space = await resolveSpaceName(token, { conferenceId, meetingCode });
+    let space = null;
+    for (let attempt = 0; attempt < 3 && !space; attempt += 1) {
+      space = await resolveSpaceName(token, { conferenceId, meetingCode });
+      if (!space && attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+      }
+    }
     if (!space) return { promoted: false, space: null, reason: "space_not_found" };
 
     const res = await fetch(`${MEET_API_BASE}/${space}/members`, {
@@ -150,7 +157,10 @@ export async function promoteTeacherToCohost({ conferenceId, meetingCode, teache
         authorization: `Bearer ${token}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ email: teacherEmail, role: "COHOST" }),
+      body: JSON.stringify({
+        user: { email: teacherEmail },
+        role: "COHOST",
+      }),
     });
 
     if (res.ok) return { promoted: true, space };
