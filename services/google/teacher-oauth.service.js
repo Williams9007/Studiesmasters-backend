@@ -125,7 +125,7 @@ export async function exchangeAndVerifyCode(code, expectedEmail = null) {
       code,
       client_id: config.clientId,
       client_secret: config.clientSecret,
-      redirect_uri: config.redirectUri,
+      redirect_uri: config.teacherRedirectUri,
       grant_type: "authorization_code",
     }),
   });
