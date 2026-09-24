@@ -15,6 +15,7 @@
 
 import { Router } from "express";
 import { verifyTeacher } from "../middleware/verifyTeacher.js";
+import Teacher from "../models/teacher.js";
 import {
   initiateTeacherVerification,
   completeTeacherVerification,
@@ -65,13 +66,13 @@ router.get("/connect", verifyTeacher, async (req, res) => {
  * Exchanges authorization code for identity verification.
  *
  * NOTE: This endpoint is public (no JWT) because Google redirects here.
- * We validate using the teacher ID stored in session/state.
+ * We resolve the teacher from the short-lived state nonce stored server-side.
  */
 router.get("/callback", async (req, res) => {
   try {
-    const { code, state, teacherId } = req.query;
+    const { code, state } = req.query;
 
-    if (!code || !state || !teacherId) {
+    if (!code || !state) {
       return res.status(400).send(`
         <!DOCTYPE html>
         <html>
@@ -87,8 +88,18 @@ router.get("/callback", async (req, res) => {
       `);
     }
 
+    const teacher = await Teacher.findOne({
+      googleOAuthNonce: state,
+      googleOAuthState: "pending",
+      googleOAuthStateExpiresAt: { $gt: new Date() },
+    }).select("_id");
+
+    if (!teacher) {
+      throw new Error("This Google connection request is invalid or has expired. Please start again.");
+    }
+
     // Complete verification (pass request info for audit logging)
-    const result = await completeTeacherVerification(code, state, teacherId, {
+    const result = await completeTeacherVerification(code, state, teacher._id, {
       ipAddress: req.ip || req.connection?.remoteAddress || null,
       userAgent: req.headers?.userAgent || req.headers?.user-agent || null,
     });

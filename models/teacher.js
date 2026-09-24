@@ -65,6 +65,9 @@ const teacherSchema = new mongoose.Schema(
       enum: ["not_connected", "pending", "verified", "disconnected"],
       default: "not_connected",
     },
+    googleOAuthNonce: { type: String, default: null, select: false },
+    googleOAuthStateExpiresAt: { type: Date, default: null, select: false },
+
 
     resetTokenExpiry: Date,
   },

@@ -162,7 +162,11 @@ export async function initiateTeacherVerification(teacherId) {
   const state = generateOAuthState();
 
   await Teacher.findByIdAndUpdate(teacherId, {
-    $set: { googleOAuthState: "pending" },
+    $set: {
+      googleOAuthState: "pending",
+      googleOAuthNonce: state,
+      googleOAuthStateExpiresAt: new Date(Date.now() + 10 * 60 * 1000),
+    },
   });
 
   const consentUrl = buildTeacherConsentUrl(state, config.redirectUri);
@@ -196,6 +200,8 @@ export async function completeTeacherVerification(code, state, teacherId, reqInf
       googleAccountVerified: true,
       googleVerifiedAt: new Date(),
       googleOAuthState: "verified",
+      googleOAuthNonce: null,
+      googleOAuthStateExpiresAt: null,
     },
   });
 
@@ -238,6 +244,8 @@ export async function disconnectTeacherGoogle(teacherId, reqInfo = {}) {
       googleAccountVerified: false,
       googleVerifiedAt: null,
       googleOAuthState: "not_connected",
+      googleOAuthNonce: null,
+      googleOAuthStateExpiresAt: null,
     },
   });
 
