@@ -257,6 +257,22 @@ export async function syncTimetableForStudent({ studentId, from = null, to = nul
       return { synced: false, reason: "moodle-user-not-found", total: sessions.length };
     }
 
+    // Native Moodle dashboard/course calendars only show events to users enrolled
+    // in the mapped course. Keep this authoritative and idempotent before the
+    // calendar event write; otherwise events can exist but remain invisible on the
+    // student's main dashboard.
+    let enrollmentGroups = 0;
+    let enrollmentFailures = 0;
+    for (const group of groups) {
+      try {
+        const result = await syncClassGroupEnrollment({ classGroupId: group._id, req });
+        if (result.synced) enrollmentGroups += 1;
+        else enrollmentFailures += 1;
+      } catch {
+        enrollmentFailures += 1;
+      }
+    }
+
     const existing = await existingUserEventIds();
     const prior = await priorEventIdsFromAudit(sessions.map((s) => s._id));
     let created = 0;
@@ -295,7 +311,16 @@ export async function syncTimetableForStudent({ studentId, from = null, to = nul
     }).catch(() => {});
     logger.info(`[MOODLE] timetable sync for student ${student._id}: created=${created} updated=${updated} failed=${failed}`);
 
-    return { synced: created + updated > 0 || failed === 0, created, updated, failed, total: sessions.length, events };
+    return {
+      synced: created + updated > 0 || failed === 0,
+      created,
+      updated,
+      failed,
+      total: sessions.length,
+      enrollmentGroups,
+      enrollmentFailures,
+      events,
+    };
   } catch (err) {
     logger.warn(`[MOODLE] timetable sync failed: ${err?.message || err}`);
     return { synced: false, reason: String(err?.message || err).slice(0, 200) };
