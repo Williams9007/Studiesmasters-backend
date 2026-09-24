@@ -281,7 +281,11 @@ export async function dashboardForUser({ role, principalId }) {
     : {};
 
   let sessions;
+  let groups = [];
   if (role === "teacher") {
+    groups = await ClassGroup.find({ $or: [{ teacher: principalId }, { substituteTeacher: principalId }] })
+      .select("code subject grade curriculum")
+      .lean();
     sessions = await ClassSession.find(baseQ)
       .populate("classGroup", "code subject grade curriculum")
       .populate("teacher", "fullName")
@@ -289,7 +293,7 @@ export async function dashboardForUser({ role, principalId }) {
       .sort({ date: 1, startTime: 1 })
       .lean();
   } else {
-    const groups = await ClassGroup.find({ students: principalId }).select("_id").lean();
+    groups = await ClassGroup.find({ students: principalId }).select("_id code subject grade curriculum").lean();
     sessions = await ClassSession.find({ classGroup: { $in: groups.map((g) => g._id) } })
       .populate("classGroup", "code subject grade curriculum")
       .populate("teacher", "fullName")
@@ -325,7 +329,15 @@ export async function dashboardForUser({ role, principalId }) {
     else if (s.status === "scheduled" && dateStr >= today) upcoming.push(item);
     else history.push(item);
   }
-  return { role, liveNow, upcoming, history };
+  const courses = groups.map((g) => ({
+    groupId: g._id,
+    code: g.code || "",
+    subject: g.subject || "",
+    grade: g.grade || "",
+    curriculum: g.curriculum || "",
+  })).filter((c) => c.subject || c.code);
+
+  return { role, courses, liveNow, upcoming, history };
 }
 /** Attendance history — student sees their own; teacher sees the roster. */
 export async function attendanceHistoryForUser({ role, principalId }) {
