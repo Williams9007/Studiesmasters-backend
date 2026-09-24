@@ -343,6 +343,9 @@ export async function syncLiveClasses({ from = null, to = null } = {}) {
 export async function syncTimetableForTeacher({ teacherId, from = null, to = null, req = null } = {}) {
   try {
     if (!config.enabled) return { synced: false, reason: "moodle-disabled" };
+    if (!config.wsEnabled || !config.wsToken) {
+      return { synced: false, reason: "moodle-ws-not-configured", dryRun: false };
+    }
 
     const Teacher = (await import("../../models/teacher.js")).default;
     const teacher = await Teacher.findById(teacherId).lean();

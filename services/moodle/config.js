@@ -109,7 +109,13 @@ export const config = {
   })(),
   wsUrl: asString(process.env.MOODLE_WS_URL) || `${asString(process.env.MOODLE_BASE_URL)}/webservice/rest/server.php`,
   wsToken: asString(process.env.MOODLE_WS_TOKEN),
-  dryRun: String(process.env.MOODLE_DRY_RUN || "true") === "true",
+  // A configured Web Services token means live sync by default. An explicit
+  // MOODLE_DRY_RUN=true still forces simulation for development/test safety.
+  dryRun: (() => {
+    const explicit = String(process.env.MOODLE_DRY_RUN ?? "").trim().toLowerCase();
+    if (explicit) return explicit === "true";
+    return !String(process.env.MOODLE_WS_TOKEN ?? "").trim();
+  })(),
 
   // Technical limits
   wsTimeoutMs: parseInt(process.env.MOODLE_WS_TIMEOUT_MS || "10000", 10),
