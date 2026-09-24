@@ -25,6 +25,14 @@ import {
 
 const router = Router();
 
+function teacherFrontendUrl(teacherId) {
+  const configured = String(process.env.FRONTEND_URL || "").trim();
+  const isValid = /^https:\/\/[^\s/]+(?:\/[^\s]*)?$/i.test(configured)
+    && !configured.includes("your-frontend-url");
+  const base = isValid ? configured.replace(/\/$/, "") : "https://studiesmasters.com";
+  return `${base}/#/teacher/dashboard/${encodeURIComponent(teacherId)}`;
+}
+
 /**
  * GET /api/google/teacher/connect
  * Initiate Google account verification for the authenticated teacher.
@@ -127,7 +135,7 @@ router.get("/callback", async (req, res) => {
           <p>Your Google account has been verified and linked to your StudiesMasters teacher account.</p>
           <p><strong>Google Email:</strong><br><span class="email">${result.googleEmail}</span></p>
           <p style="font-size: 12px; color: #94a3b8;">You can now close this window and return to your dashboard.</p>
-          <p style="margin-top: 24px;"><a href="${process.env.FRONTEND_URL || "https://studiesmasters.com"}/dashboard" class="btn">Return to Dashboard</a></p>
+          <p style="margin-top: 24px;"><a href="${teacherFrontendUrl(teacher._id)}" class="btn">Return to Dashboard</a></p>
         </div>
       </body>
       </html>
@@ -145,7 +153,7 @@ router.get("/callback", async (req, res) => {
           <h2 style="color: #dc2626; margin-top: 0;">Connection Failed</h2>
           <p>${err.message || "An error occurred during Google account verification."}</p>
           <p style="font-size: 12px; color: #94a3b8; margin-top: 16px;">Please try again or contact support if the problem persists.</p>
-          <a href="${process.env.FRONTEND_URL || "https://studiesmasters.com"}/dashboard" style="color: #2563eb; display: inline-block; margin-top: 16px;">Return to Dashboard</a>
+          <a href="${teacherFrontendUrl(req.query.teacherId || "teacher")}" style="color: #2563eb; display: inline-block; margin-top: 16px;">Return to Dashboard</a>
         </div>
       </body>
       </html>
