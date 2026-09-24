@@ -478,18 +478,34 @@ export async function syncClassGroupEnrollment({ classGroupId, req = null } = {}
     const { enrollUser } = await import("./enrollUser.js");
     // getCourseIdsFor() expects subject OBJECTS ({ name }), not bare strings.
     const base = { curriculum: group.curriculum, grade: group.grade, subjects: [{ name: group.subject }] };
-    const results = { teacher: null, students: [], failed: 0, coursesTargeted: [] };
+    const mappedCourseIds = await getCourseIdsFor(base);
+    if (!mappedCourseIds.length) {
+      return {
+        synced: false,
+        reason: "NO_COURSES_FOUND",
+        groupCode: group.code,
+        subject: group.subject,
+        curriculum: group.curriculum,
+        grade: group.grade,
+        message: `No Moodle course mapping exists for ${group.subject} / ${group.curriculum} / ${group.grade}.`,
+      };
+    }
+    const results = { teacher: null, students: [], failed: 0, coursesTargeted: [...mappedCourseIds], mappedCourseIds };
 
-    // Provision any principal that does not have a Moodle account yet —
-    // enrollUser silently skips "not_provisioned" users, so we must create
-    // the accounts (+ enrolments) before enrolling into the mapped courses.
+    // Provision from the class-group identity, not syncProfile(): the group's
+    // subject/grade is authoritative for this classroom and may differ from
+    // the student's registration subject list.
     const provision = async (role, principal) => {
-      const MoodleLink = (await import("../../models/MoodleLink.js")).default;
-      const refKey = role === "teacher" ? { teacherRef: principal._id } : { studentRef: principal._id };
-      const link = await MoodleLink.findOne(refKey).lean();
-      if (!link?.moodleUserId) {
-        await syncProfile({ id: principal._id, role, enroll: true, req });
-      }
+      const { createUser } = await import("./createUser.js");
+      const result = await createUser({
+        role,
+        id: principal._id,
+        email: principal.email,
+        fullName: principal.fullName || principal.name,
+        userId: principal.userId,
+        req,
+      });
+      return result;
     };
 
     if (group.teacher?._id) {
