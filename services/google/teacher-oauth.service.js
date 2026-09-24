@@ -205,19 +205,24 @@ export async function completeTeacherVerification(code, state, teacherId, reqInf
     },
   });
 
-  // Log to audit trail
-  await GoogleAccountAuditLog.logConnection({
-    teacherId,
-    googleEmail: newGoogleEmail,
-    performedBy: teacherId,
-    ipAddress: reqInfo.ipAddress || null,
-    userAgent: reqInfo.userAgent || null,
-    details: {
-      oldEmail: oldGoogleEmail,
-      method: "oauth_verification",
-    },
-    success: true,
-  });
+  // Audit logging is best-effort and must not turn a verified connection into
+  // a failed OAuth callback.
+  try {
+    await GoogleAccountAuditLog.logConnection({
+      teacherId,
+      googleEmail: newGoogleEmail,
+      performedBy: teacherId,
+      ipAddress: reqInfo.ipAddress || null,
+      userAgent: reqInfo.userAgent || null,
+      details: {
+        oldEmail: oldGoogleEmail,
+        method: "oauth_verification",
+      },
+      success: true,
+    });
+  } catch (auditError) {
+    console.error("Teacher Google connection audit log failed:", auditError);
+  }
 
   return {
     success: true,

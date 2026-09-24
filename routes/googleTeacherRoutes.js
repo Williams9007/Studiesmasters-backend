@@ -101,7 +101,7 @@ router.get("/callback", async (req, res) => {
     // Complete verification (pass request info for audit logging)
     const result = await completeTeacherVerification(code, state, teacher._id, {
       ipAddress: req.ip || req.connection?.remoteAddress || null,
-      userAgent: req.headers?.userAgent || req.headers?.user-agent || null,
+      userAgent: req.headers?.["user-agent"] || null,
     });
 
     // Send success page
@@ -190,7 +190,7 @@ router.post("/disconnect", verifyTeacher, async (req, res) => {
 
     await disconnectTeacherGoogle(req.user._id, {
       ipAddress: req.ip || req.connection?.remoteAddress || null,
-      userAgent: req.headers?.userAgent || req.headers?.user-agent || null,
+      userAgent: req.headers?.["user-agent"] || null,
     });
 
     res.json({
