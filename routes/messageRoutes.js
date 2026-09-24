@@ -3,7 +3,8 @@ import Message from "../models/Message.js";
 import MessageRecipient from "../models/MessageRecipient.js";
 import User from "../models/Users.js";
 import QaoUser from "../models/QaoUser.js";
-import { verifyToken } from "../middleware/auth.js"; 
+import { verifyToken } from "../middleware/auth.js";
+import { verifyTeacher } from "../middleware/verifyTeacher.js";
 // verifyToken should attach req.user
 
 const router = express.Router();
@@ -97,9 +98,13 @@ router.get("/inbox", verifyToken, async (req, res) => {
 /* =====================================================
    📥 GET MESSAGES FOR TEACHER (from Admin/QAO broadcasts)
 ===================================================== */
-router.get("/teacher/:teacherId", verifyToken, async (req, res) => {
+router.get("/teacher/:teacherId", verifyTeacher, async (req, res) => {
   try {
-    const recipientRecords = await MessageRecipient.find({ recipient: req.params.teacherId })
+    if (String(req.user._id) !== String(req.params.teacherId)) {
+      return res.status(403).json({ success: false, message: "You can only access your own messages" });
+    }
+
+    const recipientRecords = await MessageRecipient.find({ recipient: req.user._id })
       .sort({ createdAt: -1 })
       .lean();
 
