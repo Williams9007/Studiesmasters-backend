@@ -14,6 +14,65 @@ import { config, isConfiguredReal } from "./config.js";
 import { encryptValue, decryptValue } from "./encryption.js";
 
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const OAUTH_STATE_TTL_SECONDS = 10 * 60;
+
+function stateSecret() {
+  const secret = process.env.JWT_SECRET || config.tokenEncKey;
+  if (!secret || secret.length < 32) {
+    throw new Error("Google OAuth state secret must be at least 32 characters");
+  }
+  return secret;
+}
+
+function encodeStatePart(value) {
+  return Buffer.from(JSON.stringify(value)).toString("base64url");
+}
+
+function decodeStatePart(value) {
+  return JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+}
+
+/** Create a signed, expiring state that is safe across stateless app instances. */
+export function createSignedOAuthState(email = null) {
+  const payload = {
+    nonce: crypto.randomBytes(24).toString("hex"),
+    email,
+    exp: Math.floor(Date.now() / 1000) + OAUTH_STATE_TTL_SECONDS,
+  };
+  const encoded = encodeStatePart(payload);
+  const signature = crypto.createHmac("sha256", stateSecret()).update(encoded).digest("base64url");
+  return `${encoded}.${signature}`;
+}
+
+/** Verify signature, expiry, and the expected service-account binding. */
+export function verifySignedOAuthState(state, expectedEmail = null) {
+  try {
+    const [encoded, signature] = String(state || "").split(".");
+    if (!encoded || !signature) throw new Error("Malformed OAuth state");
+    const expectedSignature = crypto
+      .createHmac("sha256", stateSecret())
+      .update(encoded)
+      .digest("base64url");
+    const actual = Buffer.from(signature);
+    const expected = Buffer.from(expectedSignature);
+    if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+      throw new Error("OAuth state signature mismatch");
+    }
+    const payload = decodeStatePart(encoded);
+    if (!payload.nonce || !payload.exp || payload.exp < Math.floor(Date.now() / 1000)) {
+      throw new Error("OAuth state expired");
+    }
+    if (expectedEmail && payload.email !== expectedEmail) {
+      throw new Error("OAuth state account mismatch");
+    }
+    return payload;
+  } catch (err) {
+    const error = new Error("Invalid OAuth state");
+    error.code = "GOOGLE_OAUTH_STATE_MISMATCH";
+    error.detail = err.message;
+    throw error;
+  }
+}
 
 function hasExpired(row, skewSec = 60) {
   return row?.expiresAt && new Date(row.expiresAt).getTime() - skewSec * 1000 < Date.parse(new Date().toString());
@@ -111,10 +170,10 @@ export async function saveToken({ email, accessToken, refreshToken, scope = "", 
 
 /** Generate an OAuth2 authorization URL + persist a state nonce for validation. */
 export async function beginAuthorization({ email = null } = {}) {
-  const state = crypto.randomBytes(24).toString("hex");
+  const state = createSignedOAuthState(email);
   await GoogleToken.updateOne(
     { provider: "google", email },
-    { $set: { authState: state, authStateExpiresAt: new Date(Date.now() + 10 * 60 * 1000) } },
+    { $set: { authState: state, authStateExpiresAt: new Date(Date.now() + OAUTH_STATE_TTL_SECONDS * 1000) } },
     { upsert: true }
   );
   const params = new URLSearchParams({
@@ -131,12 +190,18 @@ export async function beginAuthorization({ email = null } = {}) {
 
 /** Exchange the authorization code for tokens. */
 export async function exchangeCode({ code, state, email = null }) {
-  const row = await GoogleToken.findOne({ provider: "google", email }).lean();
-  if (!row || !row.authState || String(row.authState) !== String(state)) {
-    const err = new Error("Invalid OAuth state");
-    err.code = "GOOGLE_OAUTH_STATE_MISMATCH";
-    throw err;
-  }
+  // State is signed and expires after 10 minutes. It is independent of the
+  // single GoogleToken row, so parallel Render instances/restarts do not lose it.
+  verifySignedOAuthState(state, email);
+  // The database claim is an extra one-time-use guard when the token row is
+  // present. The signed state is the primary validation and remains valid
+  // across stateless app instances; Google's authorization code is itself
+  // single-use, so a missing local row must not produce a false CSRF failure.
+  await GoogleToken.findOneAndUpdate(
+    { provider: "google", email, authState: state, authStateExpiresAt: { $gt: new Date() } },
+    { $set: { authState: null, authStateExpiresAt: null } },
+    { new: false }
+  ).lean();
   const body = new URLSearchParams({
     code,
     client_id: config.clientId,
