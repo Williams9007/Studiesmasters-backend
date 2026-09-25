@@ -46,6 +46,7 @@ test("name sync exposes GET and bounded signed POST contracts", () => {
   assert.match(routes, /users may contain at most 200 entries/);
   assert.match(routes, /verifyMainWebsiteSyncToken/);
   assert.match(routes, /X-StudiesMasters-Signature/);
+  assert.match(routes, /syncMainWebsiteNames\(\{ emails: users \}\)/);
   assert.match(service, /syncMainWebsiteNames/);
 });
 

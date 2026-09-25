@@ -103,7 +103,7 @@ router.post("/main-website/sync-name", nameSyncLimiter, async (req, res) => {
         signatureAuth.reason === "not_configured" ? "Main website name sync is not configured" : signatureAuth.reason);
     }
     const { syncMainWebsiteNames } = await import("../services/moodle/syncMainWebsiteName.js");
-    const result = await syncMainWebsiteNames({ users });
+    const result = await syncMainWebsiteNames({ emails: users });
     return ok(res, { action: "lookup", ...result });
   } catch (err) {
     console.error("Main website batch sync-name error:", err);
