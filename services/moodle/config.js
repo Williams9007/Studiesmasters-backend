@@ -77,6 +77,45 @@ export function isValidSecretConfigured() {
   return s.length > 0 && s[0].secret.length >= 16;
 }
 
+/** Fail-closed, timing-safe authentication for Moodle-to-main-website calls. */
+export function verifyMainWebsiteSyncToken(candidate) {
+  const expected = asString(process.env.MAIN_WEBSITE_SYNC_TOKEN);
+  if (!expected) return { ok: false, reason: "not_configured" };
+  if (/replace|change.?me|your[_-].*token/i.test(expected)) {
+    return { ok: false, reason: "not_configured" };
+  }
+  const supplied = asString(candidate);
+  if (!supplied) return { ok: false, reason: "missing_token" };
+  const a = Buffer.from(supplied);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return { ok: false, reason: "invalid_token" };
+  }
+  return { ok: true };
+}
+
+/**
+ * Verify the Hub's request signature. The Hub signs the compact JSON encoding
+ * of its users lookup array with the shared sync token.
+ */
+export function verifyMainWebsiteSyncSignature(users, candidate, token = process.env.MAIN_WEBSITE_SYNC_TOKEN) {
+  const secret = asString(token);
+  if (!secret || /replace|change.?me|your[_-].*token/i.test(secret)) {
+    return { ok: false, reason: "not_configured" };
+  }
+  const signature = asString(candidate);
+  if (!signature) return { ok: false, reason: "missing_signature" };
+  const expected = crypto.createHmac("sha256", secret)
+    .update(JSON.stringify(Array.isArray(users) ? users : []))
+    .digest("hex");
+  const a = Buffer.from(signature.toLowerCase());
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return { ok: false, reason: "invalid_signature" };
+  }
+  return { ok: true };
+}
+
 export const config = {
   enabled: String(process.env.MOODLE_ENABLED || "true") === "true",
 

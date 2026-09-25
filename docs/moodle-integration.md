@@ -77,6 +77,51 @@ enqueues durable jobs) the worker:
 Suspended/expired students are suspended in Moodle; nothing is ever lost —
 failed jobs retry with exponential backoff and dead-letter after 5 attempts.
 
+## Main-website name lookup contract
+
+The backend requires `MAIN_WEBSITE_SYNC_TOKEN`; the endpoint fails closed with
+503 when the secret is absent and 401 for a missing or incorrect token.
+
+Single lookup (used by `local_studiesmasters_sso`):
+
+```http
+GET /api/moodle/main-website/sync-name?email=user@example.com&token=<shared-token>
+```
+
+```json
+{ "success": true, "fullName": "Example User" }
+```
+
+Batch lookup (for the Hub reconciliation client, maximum 200 unique emails):
+
+```http
+POST /api/moodle/main-website/sync-name
+Content-Type: application/json
+Authorization: Bearer <shared-token>
+X-StudiesMasters-Signature: <hex HMAC-SHA256 of JSON(users), using shared-token>
+```
+
+```json
+{ "action": "lookup", "users": ["one@example.com", "two@example.com"] }
+```
+
+```json
+{
+  "success": true,
+  "action": "lookup",
+  "users": [
+    { "email": "one@example.com", "fullName": "One User" },
+    { "email": "two@example.com", "fullName": null }
+  ]
+}
+```
+
+In Moodle, configure the SSO URL as
+`https://studiesmasters-backend.onrender.com/api/moodle/main-website/sync-name`
+and set the plugin token equal to `MAIN_WEBSITE_SYNC_TOKEN`. The Hub must use
+the same token in its bearer header and compute `X-StudiesMasters-Signature`
+as lowercase hexadecimal `hash_hmac('sha256', json_encode($users), $token)`.
+
 ## Admin endpoints (all `adminAuth`-protected)
 
 | Method | Route                              | Purpose                              |

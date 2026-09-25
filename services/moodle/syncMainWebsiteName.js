@@ -6,9 +6,14 @@
 //
 // Only names are returned — passwords, roles and enrolments are never touched.
 //
-// Contract (for the Moodle plugin):
-//   GET /api/main-website/sync-name?email=...&token=...
-//   Response: { success: true, fullName: "..." }  |  { success: false, reason: "..." }
+// Contract (for Moodle plugins):
+//   GET /api/moodle/main-website/sync-name?email=...&token=...
+//   POST /api/moodle/main-website/sync-name
+//        Headers: Authorization: Bearer <token>
+//                 X-StudiesMasters-Signature: HMAC_SHA256(JSON(users), token)
+//        Body: { action: "lookup", users: ["email", ...] }
+//   Responses: { success: true, fullName: "..." } for GET;
+//   { success: true, action: "lookup", users: [{ email, fullName }] } for POST.
 
 import Student from "../../models/Student.js";
 import Teacher from "../../models/teacher.js";
@@ -53,4 +58,25 @@ export async function syncMainWebsiteName({ email, req = null } = {}) {
   return { fullName };
 }
 
-export default syncMainWebsiteName;
+/** Resolve up to 200 unique emails in a bounded batch for Moodle Hub repair jobs. */
+export async function syncMainWebsiteNames({ emails = [] } = {}) {
+  const normalized = [...new Set((Array.isArray(emails) ? emails : [])
+    .map((value) => String(value?.email || value || "").trim().toLowerCase())
+    .filter(Boolean))].slice(0, 200);
+  if (!normalized.length) return { users: [] };
+
+  const [students, teachers] = await Promise.all([
+    Student.find({ email: { $in: normalized } }).select("email fullName name").lean(),
+    Teacher.find({ email: { $in: normalized } }).select("email fullName name").lean(),
+  ]);
+  const names = new Map();
+  for (const record of [...students, ...teachers]) {
+    const name = String(record.fullName || record.name || "").trim();
+    if (name) names.set(String(record.email || "").trim().toLowerCase(), name);
+  }
+  return {
+    users: normalized.map((email) => ({ email, fullName: names.get(email) || null })),
+  };
+}
+
+export default { syncMainWebsiteName, syncMainWebsiteNames };

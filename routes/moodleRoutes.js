@@ -3,7 +3,7 @@
 // services/moodle/* (the backend is the only authority). This file only handles
 // auth, validation, rate limiting, and response shaping.
 import express from "express";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { studentAuth } from "../middleware/studentAuth.js";
 import { verifyTeacher } from "../middleware/verifyTeacher.js";
 import { adminAuth } from "../middleware/adminAuth.js";
@@ -23,7 +23,7 @@ const fail = (res, status, message, extra = {}) =>
 const moodleGlobal = rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false });
 const ssoLimiter = rateLimit({
   windowMs: 60_000, max: 20, standardHeaders: true, legacyHeaders: false,
-  keyGenerator: (req) => `${req.ip}:${req.user?._id || "anon"}`,
+  keyGenerator: (req) => `${ipKeyGenerator(req.ip)}:${req.user?._id || "anon"}`,
 });
 const adminLimiter = rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false });
 router.use(moodleGlobal);
@@ -51,25 +51,63 @@ router.get("/sso/verify", async (req, res) => {
   return res.json({ success: true, ...verdict });
 });
 
-// ---- Main website name sync (studiesmasters_mainwebsite_sync) --------------
-// Called by the Moodle SSO plugin (sso.php) during SSO login when the main
-// website sync URL + token are configured. Returns the real user name from the
-// StudiesMasters main website so Moodle user names stay current.
-// The plugin calls this as a GET with query params (email + token); token-gated.
-router.get("/main-website/sync-name", async (req, res) => {
+const nameSyncLimiter = rateLimit({ windowMs: 60_000, max: 30, standardHeaders: true, legacyHeaders: false });
+
+function mainWebsiteToken(req) {
+  const direct = String(req.get("X-Main-Website-Sync-Token") || "").trim();
+  if (direct) return direct;
+  const authorization = String(req.get("Authorization") || "").trim();
+  return authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+}
+
+// GET is retained for the current local_studiesmasters_sso plugin.
+router.get("/main-website/sync-name", nameSyncLimiter, async (req, res) => {
   try {
-    const { email, token } = req.query || {};
+    const { email } = req.query || {};
     if (!email) return fail(res, 400, "email is required");
-    const config = await import("../services/moodle/config.js");
-    const expectedToken = config.default?.mainWebsiteSyncToken;
-    if (expectedToken && token !== expectedToken) {
-      return fail(res, 401, "invalid token");
+    const { verifyMainWebsiteSyncToken } = await import("../services/moodle/config.js");
+    const auth = verifyMainWebsiteSyncToken(req.query?.token || mainWebsiteToken(req));
+    if (!auth.ok) {
+      return fail(res, auth.reason === "not_configured" ? 503 : 401,
+        auth.reason === "not_configured" ? "Main website name sync is not configured" : "invalid token");
     }
     const { syncMainWebsiteName } = await import("../services/moodle/syncMainWebsiteName.js");
     return ok(res, await syncMainWebsiteName({ email, req }));
   } catch (err) {
     console.error("Main website sync-name error:", err);
     return fail(res, 500, "Name sync failed");
+  }
+});
+
+// POST compatibility contract for a Hub/batch client. The Hub's undocumented
+// signature is not trusted; authentication is the shared token only.
+router.post("/main-website/sync-name", nameSyncLimiter, async (req, res) => {
+  try {
+    const { action = "lookup", users = [], token } = req.body || {};
+    if (action !== "lookup") return fail(res, 400, "action must be lookup");
+    if (!Array.isArray(users) || !users.length) return fail(res, 400, "users must be a non-empty array");
+    if (users.length > 200) return fail(res, 400, "users may contain at most 200 entries");
+    const { verifyMainWebsiteSyncToken, verifyMainWebsiteSyncSignature } = await import("../services/moodle/config.js");
+    const auth = verifyMainWebsiteSyncToken(token || mainWebsiteToken(req));
+    if (!auth.ok) {
+      return fail(res, auth.reason === "not_configured" ? 503 : 401,
+        auth.reason === "not_configured" ? "Main website name sync is not configured" : "invalid token");
+    }
+    const signatureAuth = verifyMainWebsiteSyncSignature(
+      users,
+      req.get("X-StudiesMasters-Signature"),
+      mainWebsiteToken(req) || req.body?.token
+    );
+    if (!signatureAuth.ok) {
+      return fail(res, signatureAuth.reason === "not_configured" ? 503 : 401,
+        signatureAuth.reason === "not_configured" ? "Main website name sync is not configured" : signatureAuth.reason);
+    }
+    const { syncMainWebsiteNames } = await import("../services/moodle/syncMainWebsiteName.js");
+    const result = await syncMainWebsiteNames({ users });
+    return ok(res, { action: "lookup", ...result });
+  } catch (err) {
+    console.error("Main website batch sync-name error:", err);
+    return fail(res, 500, "Batch name sync failed");
   }
 });
 

@@ -45,6 +45,8 @@
     "inspect:cohost": "node scripts/inspect-cohost-data.js",
     "verify:moodle-meet": "node scripts/verify-moodle-meet-link.js",
     "test:acceptance": "node scripts/acceptance-cohost-moodle.js",
+    "test:moodle-sync": "node --test tests/moodle-sync.test.js",
+    "test:moodle-preflight": "node scripts/moodle-sync-preflight.js",
     "cleanup:test-artifacts": "node scripts/cleanup-test-artifacts.js"
   }
 }
