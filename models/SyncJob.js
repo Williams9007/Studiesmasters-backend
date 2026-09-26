@@ -50,6 +50,13 @@ const syncJobSchema = new mongoose.Schema(
 
     // Idempotency key — prevents duplicate account creation / duplicate jobs.
     idempotencyKey: { type: String, unique: true, sparse: true, index: true },
+
+    // Worker lease. A process crash leaves an in_progress job behind; poll()
+    // returns it to pending after leaseExpiresAt. rerunRequested coalesces a
+    // website change that arrives while the current sync is already running.
+    lockedAt: { type: Date, default: null },
+    leaseExpiresAt: { type: Date, default: null, index: true },
+    rerunRequested: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

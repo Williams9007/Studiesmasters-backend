@@ -19,56 +19,18 @@ function pseudoId(username) {
 }
 
 export async function createUser({ role, id, email, fullName, userId = null, req = null }) {
-  const link = await findOrCreateLink({ role, id, email });
+  const link = await findOrCreateLink({ role, id, userId, email });
+  const idnumber = String(id);
 
-  if (link.moodleUserId) {
-    // In live mode, validate the stored id — it may be a stale pseudo-id from
-    // an earlier dry-run (or from a wiped Moodle). Re-create if it's not real.
-    if (!config.dryRun) {
-      try {
-        let found = await client.getUsersByField("email", [email || link.email]).catch(() => []);
-        let real = (found || []).find((u) => String(u.id) === String(link.moodleUserId));
-        if (!real) {
-          const bySearch = await client.searchUsersByEmail(email || link.email);
-          real = bySearch.find((u) => String(u.id) === String(link.moodleUserId));
-          if (!real && bySearch.length) {
-            // Account exists under a different id — adopt it.
-            logger.info(`Adopting existing Moodle account for ${link.moodleUsername}: id ${bySearch[0].id}`);
-            link.moodleUserId = bySearch[0].id;
-            await link.save();
-            return { ok: true, skipped: true, link, adopted: true };
-          }
-        }
-        if (!real) {
-          logger.warn(`Stored moodleUserId ${link.moodleUserId} for ${link.moodleUsername} is stale (dry-run artifact or wiped Moodle). Re-creating.`);
-          link.moodleUserId = null;
-          await link.save();
-        } else {
-          logger.info("Moodle user already provisioned, skipping create:", link.moodleUsername, link.moodleUserId);
-          return { ok: true, skipped: true, link };
-        }
-      } catch (err) {
-        throw err;
-      }
-    } else {
-      logger.info("Moodle user already provisioned, skipping create:", link.moodleUsername, link.moodleUserId);
-      return { ok: true, skipped: true, link };
-    }
-  }
-
-  // Reconcile first: the account may already exist in Moodle (e.g. created by
-  // an earlier partial run) while our stored id was a stale dry-run artifact.
   if (!config.dryRun) {
     try {
-      let found = await client.getUsersByField("email", [email || link.email]).catch(() => []);
-      let existing = (found || [])[0];
-      if (!existing) {
-        // getUsersByField can return [] due to profile-visibility rules even
-        // when the account exists — fall back to the admin search.
-        existing = (await client.searchUsersByEmail(email || link.email))[0];
-      }
+      // Stable identity is authoritative. Email is consulted only below as a
+      // migration fallback for pre-integration accounts.
+      let existing = await client.findByStableIdentity({ username: link.moodleUsername, idnumber });
+      if (!existing && email) existing = (await client.searchUsersByEmail(email))?.[0] || null;
       if (existing?.id) {
-        logger.info(`Adopting existing Moodle account for ${link.moodleUsername}: id ${existing.id}`);
+        const identityAdopted = String(existing.username) === link.moodleUsername || String(existing.idnumber) === idnumber;
+        logger.info(`Moodle account resolved for ${link.moodleUsername}: id ${existing.id}${identityAdopted ? "" : " (email migration fallback)"}`);
         link.moodleUserId = existing.id;
         link.suspended = false;
         link.active = true;
@@ -76,12 +38,19 @@ export async function createUser({ role, id, email, fullName, userId = null, req
         if (!link.lastSyncedProfileAt) link.lastSyncedProfileAt = new Date();
         await link.save();
         await audit({ action: "ACCOUNT_CREATED", outcome: "success",
-          detail: { moodleUsername: link.moodleUsername, adopted: true },
+          detail: { moodleUsername: link.moodleUsername, adopted: true, identityAdopted },
           studentRef: role === "student" ? id : null, teacherRef: role === "teacher" ? id : null,
           role, moodleUserId: existing.id, moodleUsername: link.moodleUsername, req, createdBy: "createUser" });
-        return { ok: true, link, moodleUserId: existing.id, adopted: true };
+        return { ok: true, link, moodleUserId: existing.id, adopted: true, identityAdopted };
       }
-    } catch (err) { /* lookup failure is non-fatal; fall through to create */ }
+    } catch (err) {
+      // A failed read is not permission to blindly create. Stable identity makes
+      // Moodle's duplicate error safe, so surface the failure and retry later.
+      throw err;
+    }
+  } else if (link.moodleUserId) {
+    logger.info("Moodle user already provisioned, skipping create:", link.moodleUsername, link.moodleUserId);
+    return { ok: true, skipped: true, link };
   }
 
   const nameParts = String(fullName || "").trim().split(/\s+/).filter(Boolean);

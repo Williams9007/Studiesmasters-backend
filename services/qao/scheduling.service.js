@@ -178,16 +178,11 @@ export async function createSession(data = {}) {
 
             await session.save();
 
-    // Automatic Moodle sync - push the new session to Moodle calendar
-    try {
-      const { syncClassSession, CLASS_SYNC_ACTIONS } = await import("../moodle/syncClass.js");
-      await syncClassSession(session.toObject(), {
-        action: meeting.meetingStatus === "ready" ? CLASS_SYNC_ACTIONS.MEETING_READY : CLASS_SYNC_ACTIONS.CREATED,
-        sessionId: session._id,
-      }).catch(() => {});
-    } catch (syncErr) {
-      console.error("Moodle auto-sync failed for new session:", syncErr.message);
-    }
+    // NOTE: the Moodle push is intentionally NOT done here. A single authoritative
+    // push runs later in this function, after the class-group enrolment sync, using
+    // the POPULATED session. Pushing here as well used the unpopulated
+    // session.toObject(), which created a second Moodle event with a blank
+    // subject/teacher and no course id.
   } else if (session.meetingStatus !== "ready") {
     session.meetingStatus = "pending";
     // Ensure coHostStatus reflects the teacher's actual state even if meeting failed
@@ -484,6 +479,16 @@ await session.save();
       }
     } catch { /* non-fatal */ }
     try { await syncClassSession(session, { action: CLASS_SYNC_ACTIONS.CANCELLED }); } catch { /* non-fatal */ }
+  } else {
+    // Every non-cancel edit must also reach Moodle. Previously ONLY a cancellation
+    // was pushed, so changing a class's date/time/teacher (or attaching a Google
+    // Meet link later) left the OLD data — and a "Meeting link pending" description
+    // — in the Moodle calendar indefinitely.
+    try {
+      await syncClassSession(session, {
+        action: session.meetingStatus === "ready" ? CLASS_SYNC_ACTIONS.MEETING_READY : CLASS_SYNC_ACTIONS.UPDATED,
+      });
+    } catch { /* display sync must never break an edit */ }
   }
   return ClassSession.findById(session._id)
     .populate("teacher", SAFE_TEACHER_FIELDS)
@@ -521,6 +526,99 @@ export async function deleteSession(id) {
   });
   return { ok: true, deleted: id };
 }
+
+/**
+ * Re-generate missing Google Meet links for classes that were scheduled while
+ * Google was not connected, then re-push each one to Moodle.
+ *
+ * Why this exists: createMeeting() deliberately never blocks scheduling, so a
+ * class created without a usable Google token is saved with meetingStatus
+ * "pending" and an EMPTY meetingLink. Because the Moodle event description is
+ * built from meetingLink, every one of those classes reached Moodle as
+ * "Meeting link pending — check back shortly." and stayed that way until someone
+ * re-generated each meeting by hand.
+ *
+ * This walks every scheduled/live session without a link, generates the meeting
+ * (regenerateMeeting() also re-pushes it to Moodle with the new link), and
+ * reports a summary so the admin UI can show what was repaired.
+ */
+export async function backfillPendingMeetings({ limit = 200, from = null, to = null, actor = null } = {}) {
+  const query = {
+    status: { $in: ["scheduled", "live"] },
+    meetingStatus: { $ne: "ready" },
+    $or: [{ meetingLink: "" }, { meetingLink: null }, { meetingLink: { $exists: false } }],
+  };
+  if (from || to) {
+    query.date = {};
+    if (from) query.date.$gte = new Date(from);
+    if (to) query.date.$lte = new Date(to);
+  }
+
+  const sessions = await ClassSession.find(query)
+    .select("_id")
+    .sort({ date: 1, startTime: 1 })
+    .limit(Math.max(1, Math.min(Number(limit) || 200, 500)))
+    .lean();
+
+  const result = { total: sessions.length, ready: 0, stillPending: 0, failed: 0, errors: [] };
+  for (const s of sessions) {
+    try {
+      const updated = await regenerateMeeting(s._id, { actor });
+      if (updated?.meetingStatus === "ready" && updated?.meetingLink) result.ready += 1;
+      else result.stillPending += 1;
+    } catch (err) {
+      result.failed += 1;
+      if (result.errors.length < 10) result.errors.push({ sessionId: String(s._id), error: String(err?.message || err).slice(0, 200) });
+    }
+  }
+  return result;
+}
+
+/**
+ * Re-push every scheduled/live session to Moodle's calendar. Useful after fixing
+ * a config problem (course mappings, enrolment, Google token) to repair a Moodle
+ * calendar in one pass without touching each class individually.
+ */
+export async function resyncAllClassSessionsToMoodle({ from = null, to = null } = {}) {
+  const query = { status: { $in: ["scheduled", "live"] } };
+  if (from || to) {
+    query.date = {};
+    if (from) query.date.$gte = new Date(from);
+    if (to) query.date.$lte = new Date(to);
+  }
+  const sessions = await ClassSession.find(query)
+    .populate("classGroup", "code subject grade curriculum")
+    .populate("teacher", "fullName")
+    .populate("substituteTeacher", "fullName")
+    .sort({ date: 1, startTime: 1 })
+    .lean();
+
+  let synced = 0;
+  let queued = 0;
+  let failed = 0;
+  for (const session of sessions) {
+    try {
+      const res = await syncClassSession(session, {
+        action: session.meetingStatus === "ready" ? CLASS_SYNC_ACTIONS.MEETING_READY : CLASS_SYNC_ACTIONS.UPDATED,
+        sessionId: String(session._id),
+      });
+      if (res?.synced) {
+        synced += 1;
+        // Persist the event/course ids so the admin UI can show the class as
+        // synced and later edits target the same Moodle event directly.
+        if (res.moodleEventId) {
+          await ClassSession.updateOne(
+            { _id: session._id },
+            { $set: { moodleEventId: res.moodleEventId, ...(res.moodleCourseId ? { moodleCourseId: res.moodleCourseId } : {}) } }
+          ).catch(() => {});
+        }
+      } else if (res?.queued) queued += 1;
+      else failed += 1;
+    } catch { failed += 1; }
+  }
+  return { total: sessions.length, synced, queued, failed };
+}
+
 // ---------------------------------------------------------------------------
 // Virtual classroom helpers
 // ---------------------------------------------------------------------------
@@ -568,10 +666,23 @@ export async function regenerateMeeting(id, { actor = null } = {}) {
   emitToAdmin("meeting:updated", { sessionId: id, meetingStatus: session.meetingStatus });
   emitToTeacher(session.teacher, "meeting:updated", { sessionId: id, meetingStatus: session.meetingStatus });
 
+  // Push to Moodle AND persist the resulting event/course ids. The result used to
+  // be discarded, so every session whose meeting was generated or re-generated
+  // here (which is the normal path: "Open class" / force-create-meeting / the
+  // backfill) kept moodleEventId = null forever — the class looked unsynced even
+  // though the Moodle event existed. Persisting the id also makes later
+  // updates/deletes target the SAME event directly instead of relying on the
+  // audit-log fallback.
+  let moodleSync = null;
   try {
-    await syncClassSession(session, {
+    moodleSync = await syncClassSession(session, {
       action: session.meetingStatus === "ready" ? CLASS_SYNC_ACTIONS.MEETING_READY : CLASS_SYNC_ACTIONS.UPDATED,
     });
+    if (moodleSync?.moodleEventId) {
+      session.moodleEventId = moodleSync.moodleEventId;
+      if (moodleSync.moodleCourseId) session.moodleCourseId = moodleSync.moodleCourseId;
+      await session.save().catch(() => {});
+    }
   } catch { /* display sync must never break scheduling */ }
 
   await logQaoAction({
@@ -582,6 +693,10 @@ export async function regenerateMeeting(id, { actor = null } = {}) {
       meetingStatus: session.meetingStatus,
       meetingProvider: session.meetingProvider,
       actor: actor ? String(actor) : null,
+      moodleEventId: session.moodleEventId || null,
+      moodleCourseId: session.moodleCourseId || null,
+      moodleSynced: moodleSync?.synced === true,
+      moodleReason: moodleSync?.synced ? null : (moodleSync?.reason || null),
     },
   });
 

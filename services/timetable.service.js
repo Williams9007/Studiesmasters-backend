@@ -193,6 +193,16 @@ export async function saveWeeklySlots({ classGroupId, slots = [], teacher = null
   }
   await group.save();
 
+  // Assigning (or changing) a teacher must also reach Moodle: the teacher has to
+  // be enrolled in the class's mapped course, otherwise every calendar event we
+  // push for that class is invisible to them.
+  if (group.teacher) {
+    try {
+      const { syncClassGroupEnrollment } = await import("../moodle/syncTimetable.js");
+      await syncClassGroupEnrollment({ classGroupId: group._id });
+    } catch { /* best-effort; never block saving the timetable */ }
+  }
+
   const populated = await ClassGroup.findById(group._id)
     .populate("teacher", "fullName email employeeRole employmentStatus photo")
     .lean();

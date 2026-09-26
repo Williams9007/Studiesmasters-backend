@@ -408,8 +408,16 @@ const startServer = async () => {
       }
     }
 
-    // Queue worker: process durable sync jobs.
-    const workerEnabled = String(process.env.MOODLE_WORKER_ENABLED || process.env.MOODLE_WS_ENABLED || "false") === "true";
+    // Queue worker: process durable sync jobs. A token is enough to enable live
+    // WS mode, so infer the worker from that as well as the explicit flags.
+    const explicitWsEnabled = String(process.env.MOODLE_WS_ENABLED ?? "").trim().toLowerCase();
+    const workerEnabled = String(process.env.MOODLE_WORKER_ENABLED ?? (
+      explicitWsEnabled ? explicitWsEnabled : (process.env.MOODLE_WS_TOKEN ? "true" : "false")
+    )) === "true";
+    const moodleLiveReady = Boolean(process.env.MOODLE_BASE_URL && process.env.MOODLE_WS_TOKEN)
+      && String(explicitWsEnabled || "true") === "true"
+      && String(process.env.MOODLE_DRY_RUN ?? "false") !== "true";
+    console.info(`[Moodle] mode=${moodleLiveReady ? "live" : "dry-run/incomplete"}; worker=${workerEnabled}; autoSync=${String(process.env.MOODLE_AUTO_SYNC || "false") === "true"}; reconciliation=${String(process.env.MOODLE_RECONCILIATION_ENABLED || "false") === "true"}`);
     if (workerEnabled) {
       try {
         const moodleFacade = await import("./services/moodle/index.js");

@@ -893,11 +893,182 @@ router.put("/class-groups/:id/teacher", adminAuth, validate(schemas.assignTeache
     const group = await ClassGroup.findByIdAndUpdate(req.params.id, { teacher: teacher._id }, { new: true }).populate("teacher", "fullName email");
     if (!group) return res.status(404).json({ message: "Class group not found." });
 
-    await logAudit({ admin: req.admin, action: "CLASS_GROUP_TEACHER_ASSIGNED", resource: "ClassGroup", resourceId: group._id.toString(), details: { teacherId: req.body.teacherId }, req });
+    // Push the assignment to Moodle (account + editing-teacher enrolment on the
+    // course(s) mapped for this class's subject/curriculum/grade). Without this
+    // the newly assigned teacher had course calendar events pushed to a course
+    // they were never enrolled in, so their Moodle calendar stayed EMPTY.
+    let moodle = null;
+    try {
+      const { syncClassGroupEnrollment } = await import("../services/moodle/syncTimetable.js");
+      moodle = await syncClassGroupEnrollment({ classGroupId: group._id, req });
+    } catch (moodleErr) {
+      moodle = { synced: false, reason: String(moodleErr?.message || moodleErr).slice(0, 200) };
+    }
 
-    res.json({ group });
+    await logAudit({ admin: req.admin, action: "CLASS_GROUP_TEACHER_ASSIGNED", resource: "ClassGroup", resourceId: group._id.toString(), details: { teacherId: req.body.teacherId, moodle }, req });
+
+    res.json({ group, moodle });
   } catch (error) {
     res.status(500).json({ message: "Unable to assign the teacher." });
+  }
+});
+
+// ================= ASSIGN SUBJECT TO TEACHER =================
+// Used by the admin "Assign Subject to Teacher" modal on the main website.
+// This endpoint was MISSING entirely, so the modal's POST /api/admin/assign-subject
+// returned 404 and the subject was never stored — which is why assigned subjects
+// never appeared on the main website (teacher dashboard) and never reached Moodle.
+//
+// It writes to BOTH authoritative places:
+//   1. Teacher.subjectsTeaching -> shown on the main website (teacher subjects).
+//   2. TeacherAssignment row     -> drives the Moodle course mapping for teachers
+//      (services/moodle/syncProfile.js reads it to resolve the teacher's courses).
+// Then it refreshes the teacher's Moodle account + enrolments so the assignment is
+// visible in Moodle immediately.
+router.post("/assign-subject", adminAuth, async (req, res) => {
+  try {
+    const { teacherId, subjectId } = req.body || {};
+    if (!teacherId || !subjectId) {
+      return res.status(400).json({ success: false, message: "teacherId and subjectId are required." });
+    }
+
+    const [teacher, subject] = await Promise.all([
+      Teacher.findById(teacherId).select("fullName name email curriculum subjectsTeaching").lean(),
+      Subject.findById(subjectId).select("name curriculum grade package").lean(),
+    ]);
+    if (!teacher) return res.status(404).json({ success: false, message: "Teacher not found." });
+    if (!subject) return res.status(404).json({ success: false, message: "Subject not found." });
+
+    // 1) Main-website source of truth: the teacher's assigned subjects.
+    await Teacher.updateOne({ _id: teacherId }, { $addToSet: { subjectsTeaching: subject._id } });
+
+    // 2) Moodle course-resolution source of truth. A TeacherAssignment row needs a
+    //    package + grade; fall back to the subject's own values so the unique
+    //    index does not block several grades of the same subject.
+    const curriculum = subject.curriculum || teacher.curriculum || "";
+    try {
+      const TeacherAssignment = (await import("../models/TeacherAssignment.js")).default;
+      await TeacherAssignment.findOneAndUpdate(
+        {
+          teacherId,
+          curriculum,
+          package: subject.package || "N/A",
+          grade: subject.grade || "N/A",
+          subject: subject.name,
+        },
+        { $setOnInsert: { assignedAt: new Date() } },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+    } catch (assignmentErr) {
+      // A duplicate-key race must not fail the assignment itself.
+      if (assignmentErr?.code !== 11000) throw assignmentErr;
+    }
+
+    // 3) Reflect the assignment in Moodle (account + teacher enrolments on the
+    //    mapped courses). Best-effort: a Moodle outage never loses the assignment.
+    let moodle = null;
+    try {
+      const { syncProfile } = await import("../services/moodle/syncProfile.js");
+      moodle = await syncProfile({ id: teacherId, role: "teacher", enroll: true, req });
+    } catch (moodleErr) {
+      moodle = { ok: false, error: String(moodleErr?.message || moodleErr).slice(0, 200) };
+    }
+
+    const updated = await Teacher.findById(teacherId)
+      .select("fullName email curriculum subjectsTeaching")
+      .populate("subjectsTeaching", "name curriculum grade package")
+      .lean();
+
+    await logAudit({
+      admin: req.admin,
+      action: "TEACHER_SUBJECT_ASSIGNED",
+      resource: "Teacher",
+      resourceId: String(teacherId),
+      details: { subjectId: String(subject._id), subject: subject.name, curriculum, moodle },
+      req,
+    });
+
+    return res.json({
+      success: true,
+      message: `${subject.name} assigned to ${teacher.fullName || teacher.name || "the teacher"}.`,
+      teacher: updated,
+      subjects: updated?.subjectsTeaching || [],
+      moodle,
+    });
+  } catch (error) {
+    console.error("Assign subject error:", error);
+    return res.status(500).json({ success: false, message: error.message || "Unable to assign the subject." });
+  }
+});
+
+// Read model for the main website: every teacher's assigned subjects. Previously
+// only /api/teachers/:id/subjects existed and it returned raw ObjectIds instead of
+// populated subject documents, so the admin grid and the teacher dashboard both
+// rendered blank subject names.
+router.get("/assigned-subjects", adminAuth, async (req, res) => {
+  try {
+    const teachers = await Teacher.find({ employmentStatus: { $ne: "former" } })
+      .select("fullName name email userId curriculum employeeRole subjectsTeaching")
+      .populate("subjectsTeaching", "name curriculum grade package moodleCourseId")
+      .sort({ fullName: 1 })
+      .lean();
+    const assignments = teachers.map((t) => ({
+      teacherId: t._id,
+      name: t.fullName || t.name || "Teacher",
+      email: t.email,
+      userId: t.userId,
+      curriculum: t.curriculum,
+      employeeRole: t.employeeRole,
+      subjects: (t.subjectsTeaching || []).map((s) => ({
+        _id: s?._id || null,
+        name: s?.name || "",
+        grade: s?.grade || "",
+        package: s?.package || "",
+        moodleCourseId: s?.moodleCourseId ?? null,
+      })),
+    }));
+    res.json({ success: true, assignments });
+  } catch (error) {
+    console.error("Assigned subjects error:", error);
+    res.status(500).json({ success: false, message: "Failed to load assigned subjects." });
+  }
+});
+
+// Remove a subject from a teacher (keeps the main website and Moodle in step).
+router.delete("/assign-subject/:teacherId/:subjectId", adminAuth, async (req, res) => {
+  try {
+    const { teacherId, subjectId } = req.params;
+    await Teacher.updateOne({ _id: teacherId }, { $pull: { subjectsTeaching: subjectId } });
+
+    // Rebuild Moodle course access from what is left, so a removed subject's
+    // courses are unenrolled instead of lingering.
+    try {
+      const TeacherAssignment = (await import("../models/TeacherAssignment.js")).default;
+      const remaining = await Teacher.findById(teacherId).select("subjectsTeaching").lean();
+      const subjectDocs = await Subject.find({ _id: { $in: remaining?.subjectsTeaching || [] } })
+        .select("name curriculum grade package")
+        .lean();
+      await TeacherAssignment.deleteMany({ teacherId });
+      if (subjectDocs.length) {
+        await TeacherAssignment.insertMany(
+          subjectDocs.map((s) => ({
+            teacherId,
+            curriculum: s.curriculum || "",
+            package: s.package || "N/A",
+            grade: s.grade || "N/A",
+            subject: s.name,
+          })),
+          { ordered: false }
+        ).catch(() => {});
+      }
+      const { syncProfile } = await import("../services/moodle/syncProfile.js");
+      await syncProfile({ id: teacherId, role: "teacher", enroll: true, req });
+    } catch { /* best-effort — the main website already reflects the removal */ }
+
+    await logAudit({ admin: req.admin, action: "TEACHER_SUBJECT_UNASSIGNED", resource: "Teacher", resourceId: String(teacherId), details: { subjectId: String(subjectId) }, req });
+    res.json({ success: true, message: "Subject unassigned." });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message || "Unable to unassign the subject." });
   }
 });
 
@@ -943,9 +1114,21 @@ router.post("/class-groups/:id/students", adminAuth, validate(schemas.addStudent
 
     const populated = await ClassGroup.findById(group._id).populate("teacher", "fullName email").populate("students", "fullName email phone grade");
 
-    await logAudit({ admin: req.admin, action: "CLASS_GROUP_STUDENTS_ADDED", resource: "ClassGroup", resourceId: group._id.toString(), details: { studentIds: newIds.map((id) => id.toString()), added: newIds.length, duplicates: duplicates }, req });
+    // Enrol the newly added students in the class's Moodle course. Without this a
+    // student is a member of the class on the main website but NOT in Moodle, so
+    // the pushed calendar events (and the Meet links inside them) never appear for
+    // them.
+    let moodle = null;
+    try {
+      const { syncClassGroupEnrollment } = await import("../services/moodle/syncTimetable.js");
+      moodle = await syncClassGroupEnrollment({ classGroupId: group._id, req });
+    } catch (moodleErr) {
+      moodle = { synced: false, reason: String(moodleErr?.message || moodleErr).slice(0, 200) };
+    }
 
-    res.json({ message: `${newIds.length} student(s) added to ${group.code}.${duplicates ? ` ${duplicates} already existed.` : ""}`, group: populated });
+    await logAudit({ admin: req.admin, action: "CLASS_GROUP_STUDENTS_ADDED", resource: "ClassGroup", resourceId: group._id.toString(), details: { studentIds: newIds.map((id) => id.toString()), added: newIds.length, duplicates: duplicates, moodle }, req });
+
+    res.json({ message: `${newIds.length} student(s) added to ${group.code}.${duplicates ? ` ${duplicates} already existed.` : ""}`, group: populated, moodle });
   } catch (error) {
     console.error("Add students to group error:", error);
     res.status(500).json({ message: "Unable to add students to the group." });
@@ -1129,6 +1312,79 @@ router.post("/timetable/sync-moodle", adminAuth, async (req, res) => {
     res.json({ success: true, total: sessions.length, synced, queued, failed });
   } catch (err) {
     console.error("Admin timetable Moodle sync error:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ================= REPAIR: MEET LINKS + MOODLE CALENDAR =================
+// One-click repair for the two problems that made scheduled classes look broken
+// in Moodle:
+//   1. Classes created while Google was not connected were saved with
+//      meetingStatus "pending" and NO meetingLink, so their Moodle events said
+//      "Meeting link pending" forever. POST here generates the missing links
+//      (each regeneration immediately re-pushes to Moodle with the link).
+//   2. Any class whose Moodle event drifted (old time, blank subject/teacher,
+//      wrong course) is re-pushed in a single pass.
+// The response also reports the Google connection state so the admin knows
+// whether to connect the Google account before/after running the repair.
+router.post("/sessions/backfill-meetings", adminAuth, async (req, res) => {
+  try {
+    const scheduleSvc = await import("../services/qao/scheduling.service.js");
+    const google = await import("../services/google/config.js");
+    const googleStatus = { configured: google.isConfiguredReal(), allowMock: google.config.allowMock };
+
+    // Report whether the shareable company Google account is actually connected —
+    // without it no real Meet link can be minted (the #1 cause of pending links).
+    try {
+      const GoogleToken = (await import("../models/GoogleToken.js")).default;
+      const svcEmail = "virtualclass@studiesmasters.com";
+      const row = await GoogleToken.findOne({ provider: "google", email: svcEmail }).lean();
+      googleStatus.account = svcEmail;
+      googleStatus.connected = Boolean(row?.encryptedRefreshToken);
+    } catch { /* status is informative only */ }
+
+    const backfill = await scheduleSvc.backfillPendingMeetings({
+      limit: req.body?.limit || 200,
+      from: req.body?.from || null,
+      to: req.body?.to || null,
+      actor: req.admin?.id || null,
+    });
+
+    const moodle = req.body?.resyncMoodle === false
+      ? null
+      : await scheduleSvc.resyncAllClassSessionsToMoodle({ from: req.body?.from || null, to: req.body?.to || null });
+
+    await logAudit({
+      admin: req.admin,
+      action: "MEET_LINKS_BACKFILLED",
+      resource: "ClassSession",
+      details: { backfill, moodle, google: googleStatus },
+      req,
+    });
+
+    const message = backfill.ready > 0
+      ? `${backfill.ready} Google Meet link(s) created and pushed to Moodle.`
+      : googleStatus.connected
+        ? "No classes were missing a Meet link."
+        : `No Meet links could be created — connect ${googleStatus.account || "the company Google account"} in Admin → Google first.`;
+
+    res.json({ success: true, message, google: googleStatus, backfill, moodle });
+  } catch (err) {
+    console.error("Meet link backfill error:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Re-push every scheduled class to Moodle (no Meet generation). Useful after
+// changing course mappings or fixing a Moodle token/capability problem.
+router.post("/sessions/resync-moodle", adminAuth, async (req, res) => {
+  try {
+    const { resyncAllClassSessionsToMoodle } = await import("../services/qao/scheduling.service.js");
+    const result = await resyncAllClassSessionsToMoodle({ from: req.body?.from || null, to: req.body?.to || null });
+    await logAudit({ admin: req.admin, action: "CLASS_SESSIONS_RESYNCED", resource: "ClassSession", details: result, req });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("Resync sessions error:", err);
     res.status(500).json({ success: false, message: err.message });
   }
 });

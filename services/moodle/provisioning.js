@@ -44,24 +44,34 @@ async function ensureCategories() {
     for (const c of existing || []) if (c.idnumber && c.id) categoryIds.set(c.idnumber, c.id);
   }
 
-  // Create the missing ones, parents (top-level) before subcategories.
+  // Create in dependency order: top-level categories first, persist their
+  // returned ids, then children. Never place a child in the same batch as a
+  // newly-created parent because its numeric parent id does not exist yet.
   const missing = expected.filter((c) => !categoryIds.has(c.idnumber));
-  const ordered = [...missing].sort((a, b) => (a.level ? 1 : 0) - (b.level ? 1 : 0));
+  const topLevel = missing.filter((c) => !c.level);
+  const children = missing.filter((c) => c.level);
   const created = [];
 
-  if (ordered.length) {
-    const payload = ordered.map((c) => ({
+  const createStage = async (items, stage) => {
+    if (!items.length) return;
+    const payload = items.map((c) => ({
       name: c.level || c.curriculum,
       idnumber: c.idnumber,
-      parent: c.level ? categoryIds.get(`sm-${c.curriculum.toLowerCase()}`) || 0 : 0,
+      parent: c.level ? categoryIds.get(`sm-${c.curriculum.toLowerCase()}`) : 0,
     }));
+    if (!config.dryRun && items.some((c) => c.level && !payload.find((p) => p.idnumber === c.idnumber)?.parent)) {
+      throw new Error(`Cannot provision ${stage}: parent category id is unavailable`);
+    }
     const results = await client.createCategories(payload);
     for (let i = 0; i < payload.length; i += 1) {
       const id = results?.[i]?.id ?? null;
       if (id != null) categoryIds.set(payload[i].idnumber, id);
       created.push({ idnumber: payload[i].idnumber, id });
     }
-  }
+  };
+
+  await createStage(topLevel, "top-level categories");
+  await createStage(children, "child categories");
 
   return { categoryIds, createdCategories: created };
 }

@@ -168,6 +168,17 @@ export const client = {
     (values || []).forEach((v, i) => { p[`values[${i}]`] = v; });
     return callWs("core_user_get_users_by_field", p);
   },
+  /** Resolve a Moodle user by immutable identity, never email preference. */
+  async findByStableIdentity({ username, idnumber }) {
+    if (!username && idnumber == null) return null;
+    const users = await this.getUsersByField("username", [username].filter(Boolean));
+    if (users?.length) return users[0];
+    if (idnumber != null) {
+      const byIdNumber = await this.getUsersByField("idnumber", [String(idnumber)]);
+      if (byIdNumber?.length) return byIdNumber[0];
+    }
+    return null;
+  },
   // Admin-level user search — not subject to per-course profile visibility,
   // unlike core_user_get_users_by_field. Requires core_user_get_users in the
   // WS service. Returns array of user objects (may be empty).

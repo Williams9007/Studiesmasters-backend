@@ -28,14 +28,23 @@ const HANDLERS = {
   syncClass: (p) => replayQueuedClassSync({ sessionId: p.sessionId, action: p.action }),
 };
 
+export function assertHandlerSucceeded(result, job) {
+  if (result && result.ok === false) {
+    throw new Error(result.error || `${job.type} returned ok:false`);
+  }
+  // Services returning no result are legacy success-by-completion handlers.
+  // Any object that explicitly reports failure is always retried.
+}
+
 export async function processQueueBatch({ max = 10 } = {}) {
   const jobs = await poll({ max });
   for (const job of jobs) {
     try {
       const handler = HANDLERS[job.type];
       if (!handler) throw new Error(`no handler for job type ${job.type}`);
-      await handler(job.payload || {});
-      await complete({ jobId: job._id, ok: true });
+      const result = await handler(job.payload || {});
+      assertHandlerSucceeded(result, job);
+      await complete({ jobId: job._id, runId: job.runId, ok: true });
       await audit({ action: "SYNC_COMPLETED", outcome: "success",
         detail: { type: job.type }, runId: job.runId, createdBy: "worker" });
     } catch (err) {
@@ -43,7 +52,7 @@ export async function processQueueBatch({ max = 10 } = {}) {
         await audit({ action: "SYNC_FAILED", outcome: "failure",
           failure: err.message, detail: { type: job.type, attempts: job.attempts }, runId: job.runId, createdBy: "worker" });
       }
-      await complete({ jobId: job._id, ok: false, error: err.message });
+      await complete({ jobId: job._id, runId: job.runId, ok: false, error: err.message });
     }
   }
   return jobs.length;
@@ -51,9 +60,17 @@ export async function processQueueBatch({ max = 10 } = {}) {
 
 export function startWorker({ intervalMs = 2000, enabled = true } = {}) {
   if (!enabled) return { stop: () => {} };
-  const timer = setInterval(() => processQueueBatch({ max: 10 }).catch((e) => logger.error("Worker loop error:", e.message)), intervalMs);
+  let batchRunning = false;
+  const run = async () => {
+    if (batchRunning) return; // never overlap slow batches within one process
+    batchRunning = true;
+    try { await processQueueBatch({ max: 10 }); }
+    catch (e) { logger.error("Worker loop error:", e.message); }
+    finally { batchRunning = false; }
+  };
+  const timer = setInterval(run, intervalMs);
   logger.info(`Moodle queue worker started (every ${intervalMs}ms)`);
   return { stop: () => clearInterval(timer) };
 }
 
-export default { processQueueBatch, startWorker };
+export default { assertHandlerSucceeded, processQueueBatch, startWorker };
