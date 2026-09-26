@@ -21,13 +21,61 @@
 
 import { isFresh } from "./verifySSO.js";
 import { verifyPayload, signPayload } from "./config.js";
-import { generateNonce, claimNonce, reserveNonce } from "./store.js";
+import { generateNonce, claimNonce, reserveNonce, findOrCreateLink } from "./store.js";
 import { audit } from "./audit.js";
 import ClassSession from "../../models/ClassSession.js";
 import ClassGroup from "../../models/ClassGroup.js";
 import MoodleLink from "../../models/MoodleLink.js";
+import Student from "../../models/Student.js";
+import Teacher from "../../models/teacher.js";
 import { recordAttendance, regenerateMeeting, endSession } from "../qao/scheduling.service.js";
 import { emitToAdmin, emitToQaos, emitToTeacher, emitToStudents } from "../qao/notify.js";
+
+
+/**
+ * Re-derive a principal from a stable Moodle username and (re)create its
+ * MoodleLink. The username is sm_s_<hex> / sm_t_<hex>, where <hex> is the
+ * immutable Mongo _id — so the id inside the username is authoritative and no
+ * other user-supplied field is trusted. Idempotent: an existing link is never
+ * overwritten, only a missing one is created (plus the username-drift realign).
+ *
+ * Returns the created/found link, or null when the username is not a valid
+ * stable id or no principal matches — a genuinely unknown account, which must
+ * still be rejected.
+ */
+async function healLinkForUsername(username, email = "") {
+  const m = /^(sm_[st])_([a-f\d]{12,})$/i.exec(String(username || ""));
+  if (!m) return null;
+  const role = m[1].toLowerCase() === "sm_t" ? "teacher" : "student";
+  const id = m[2].toLowerCase();
+  // Only the hex of a real ObjectId is acceptable. A non-ObjectId id means the
+  // username came from the legacy userId-derived scheme, which needs an
+  // explicit repair (scripts/fix-vclass-link.js) — never a guess.
+  if (!/^[a-f\d]{24}$/.test(id)) return null;
+
+  const Model = role === "teacher" ? Teacher : Student;
+  const doc = await Model.findById(id).select("email").lean().catch(() => null);
+  if (!doc) return null;
+
+  const refKey = role === "teacher" ? { teacherRef: doc._id } : { studentRef: doc._id };
+  const existing = await MoodleLink.findOne(refKey).lean();
+  if (existing) {
+    // A link exists for the PRINCIPAL but is filed under a different username
+    // (the store.js rewrite drift). Realign it — but only if this username is
+    // not already owned by someone else.
+    if (existing.moodleUsername !== username) {
+      const taken = await MoodleLink.findOne({ moodleUsername: username }).lean();
+      if (!taken) {
+        const fixed = await MoodleLink.findOne(refKey);
+        fixed.moodleUsername = username;
+        await fixed.save();
+        return fixed;
+      }
+    }
+    return existing;
+  }
+  return findOrCreateLink({ role, id: doc._id, email: email || doc.email || "" });
+}
 
 const detectKind = (u) => String(u || "").startsWith("sm_t") ? "teacher" : "student";
 
@@ -52,8 +100,26 @@ export async function verifyClassRequest({ username, email, timestamp, nonce, co
   // reserved against its owner, and a username with no MoodleLink has no
   // principal to authorize — never let it through with a null principalId
   // (downstream $or:{null} queries would widen to unassigned sessions).
-  const link = await MoodleLink.findOne({ moodleUsername: user }).lean();
-  const principalRef = link?.studentRef || link?.teacherRef || null;
+  let link = await MoodleLink.findOne({ moodleUsername: user }).lean();
+  let principalRef = link?.studentRef || link?.teacherRef || null;
+  if (!principalRef) {
+    // Self-heal: the username IS the identity (sm_s_<hex> / sm_t_<hex> is
+    // derived from the immutable Mongo _id), so a validly signed request whose
+    // link is missing means the link was never created (autosync off, dry-run,
+    // or a failed job) — NOT that the user is unknown. Re-derive the principal
+    // from the id and create the link idempotently, so a missing link cannot
+    // permanently strand an enrolled user with an empty dashboard.
+    const healed = await healLinkForUsername(user, mail).catch(() => null);
+    if (healed) {
+      link = await MoodleLink.findOne({ moodleUsername: user }).lean();
+      principalRef = link?.studentRef || link?.teacherRef || null;
+      if (principalRef) {
+        await audit({ action: "CLASS_ACCESS_HEALED", outcome: "success",
+          detail: { username: user, principalId: String(principalRef), role: link?.role },
+          req, moodleUsername: user, createdBy: "verifyClassRequest" }).catch(() => {});
+      }
+    }
+  }
   if (!principalRef) {
     await audit({ action: "CLASS_ACCESS_DENIED", outcome: "failure", failure: "no MoodleLink for username", req, moodleUsername: user }).catch(() => {});
     return { ok: false, reason: "unknown_user", step: "identity" };

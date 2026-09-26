@@ -45,7 +45,17 @@ check("sets googleMeet.ownerEmail", sched.includes("ownerEmail: \"virtualclass@s
 check("sets googleMeet.teacherEmail", /teacherEmail:\s*teacherGoogleEmail/.test(sched));
 check("sets coHostStatus invited", sched.includes('"invited"'));
 check("graceful not_configured fallback", sched.includes('"not_configured"'));
-check("automatic Moodle sync after create", /syncClassSession/.test(sched) && /Moodle auto-sync/.test(sched));
+// The automatic push must run EXACTLY ONCE per create, from the single
+// authoritative block (after the class-group enrolment sync, using the populated
+// session). A second push used the unpopulated session and produced a duplicate
+// Moodle event with a blank subject/teacher, so it was deliberately removed.
+check(
+  "automatic Moodle sync after create (single authoritative push)",
+  /syncClassSession/.test(sched) &&
+    /syncClassGroupEnrollment/.test(sched) &&
+    /ORDER MATTERS/.test(sched) &&
+    !/Moodle auto-sync failed for new session/.test(sched)
+);
 
 console.log("\n[5] Moodle sync carries the Google Meet link");
 const syncTimetable = read(path.join(root, "services", "moodle", "syncTimetable.js"));
@@ -172,6 +182,95 @@ check("main-website name endpoint tolerates legacy teacher name field",
 const ssoVersionPhp = read(path.join(root, "..", "moodle-sso", "local", "studiesmasters_sso", "version.php"));
 const ssoVersion = Number((ssoVersionPhp.match(/\$plugin->version\s*=\s*(\d+)/) || [])[1] || 0);
 check(`sso plugin version >= 2026092304 for redeploy (got ${ssoVersion})`, ssoVersion >= 2026092304);
+
+// --------------------------------------- Per-user virtual class access (Gate 1/2)
+console.log("\n[15] Virtual class: self-healing identity + actionable errors");
+check("verifyClassRequest self-heals a missing MoodleLink",
+  classPortal.includes("healLinkForUsername(user, mail)"));
+check("heal helper only accepts a real ObjectId username (no guessing)",
+  classPortal.includes("sm_[st]") && classPortal.includes("a-f\\d]{24}$"));
+check("heal helper is idempotent (findOrCreateLink, never a blind insert)",
+  classPortal.includes("return findOrCreateLink({ role, id: doc._id"));
+check("heal realigns username drift only when the username is unowned",
+  classPortal.includes("const taken = await MoodleLink.findOne({ moodleUsername: username })"));
+check("unlinked account still rejected when no principal matches",
+  classPortal.includes('reason: "unknown_user"'));
+check("plugin turns unknown_user into an actionable message",
+  plugin.includes("unknown_user") && plugin.includes("not linked to a StudiesMasters account"));
+const diagnose = read(path.join(root, "scripts", "diagnose-vclass-user.js"));
+check("diagnostic reports both gates", diagnose.includes("GATE 1 FAILED") && diagnose.includes("GATE 2 FAILED"));
+check("diagnostic is read-only (never writes)", !/MoodleLink\.(create|updateOne|deleteOne|insertMany)/.test(diagnose));
+const fixLink = read(path.join(root, "scripts", "fix-vclass-link.js"));
+check("repair script defaults to dry-run", fixLink.includes('const APPLY = flag("apply")'));
+check("repair script can rename the Moodle account", fixLink.includes("--rename-moodle") && fixLink.includes("client.updateUser(link.moodleUserId, { username: canonical })"));
+
+// --------------------------------------- Dashboard block ships + bulk add CLI
+console.log("\n[16] Dashboard block is deployable and reaches /my/ without manual steps");
+const blockDir = path.join(root, "..", "moodle-sso", "blocks", "studiesmasters_virtualclass");
+const deployBlock = path.join(root, "..", "deploy", "blocks", "studiesmasters_virtualclass");
+check("block ships in deploy/ (not only in moodle-sso/)", fs.existsSync(path.join(deployBlock, "block_studiesmasters_virtualclass.php")));
+check("block lang + version ship in deploy/", fs.existsSync(path.join(deployBlock, "version.php")) && fs.existsSync(path.join(deployBlock, "lang", "en", "block_studiesmasters_virtualclass.php")));
+const blockCode = read(path.join(blockDir, "block_studiesmasters_virtualclass.php"));
+check("block has a cURL path (allow_url_fopen may be off)", blockCode.includes("curl_init") && blockCode.includes("vc_block_http_get"));
+check("block renders a distinct unlinked-account message", blockCode.includes("account_not_linked"));
+check("block classes have a stylesheet", fs.existsSync(path.join(blockDir, "styles.css")) && fs.existsSync(path.join(blockDir, "styles.php")));
+const cli = read(path.join(root, "..", "moodle-sso", "cli", "add_studiesmasters_dashboard_block.php"));
+check("bulk-add CLI inserts block_instances on user-dashboard", cli.includes("'blockname' => 'studiesmasters_virtualclass'") && cli.includes("'pagetypepattern' => $pagetype"));
+check("bulk-add CLI defaults to dry-run and supports --remove", cli.includes("--dry-run") && cli.includes("--remove"));
+check("bulk-add CLI only targets SSO usernames", cli.includes("sm_s_") && cli.includes("sm_t_"));
+check("bulk-add CLI ships in deploy/cli", fs.existsSync(path.join(root, "..", "deploy", "cli", "add_studiesmasters_dashboard_block.php")));
+check("deploy/ local plugin is not stale vs moodle-sso/",
+  read(path.join(root, "..", "deploy", "studiesmasters_virtualclass", "version.php")) === vclassVersionPhp
+  && fs.existsSync(path.join(root, "..", "deploy", "studiesmasters_virtualclass", "lib.php")));
+
+console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
+
+// ------------------- Assignments on the main website + Moodle propagation
+console.log("\n[15] Assigned classes/subjects show on main website + sync to Moodle");
+const adminRoutes = read(path.join(root, "routes", "adminRoutes.js"));
+const teacherRoutes = read(path.join(root, "routes", "teacherRoutes.js"));
+const timetableSvc = read(path.join(root, "services", "timetable.service.js"));
+
+// The admin "Assign Subject to Teacher" modal POSTs here; the endpoint used to be
+// MISSING, so the subject was silently never stored.
+check("POST /admin/assign-subject exists", /router\.post\("\/assign-subject", adminAuth/.test(adminRoutes));
+check("assign-subject writes Teacher.subjectsTeaching", /\$addToSet:\s*\{\s*subjectsTeaching/.test(adminRoutes));
+check("assign-subject upserts TeacherAssignment for Moodle course mapping", /TeacherAssignment\.findOneAndUpdate/.test(adminRoutes));
+check("assign-subject refreshes the teacher in Moodle", /syncProfile\(\{\s*id:\s*teacherId,\s*role:\s*"teacher"/.test(adminRoutes));
+check("GET /admin/assigned-subjects read model exists", /router\.get\("\/assigned-subjects", adminAuth/.test(adminRoutes));
+check("assigned-subjects populates name/grade/package", /populate\("subjectsTeaching", "name curriculum grade package moodleCourseId"\)/.test(adminRoutes));
+check("DELETE /admin/assign-subject unassigns + resyncs", /router\.delete\("\/assign-subject\/:teacherId\/:subjectId", adminAuth/.test(adminRoutes));
+
+// The teacher's own subjects endpoint returned raw ObjectIds -> blank subject names
+// on the teacher dashboard and in the timetable-upload dropdown.
+check("Teacher /:id/subjects populates subjectsTeaching", /findById\(req\.params\.id\)[\s\S]{0,160}\.populate\("subjectsTeaching", "name curriculum grade package price moodleCourseId"\)/.test(teacherRoutes));
+check("Teacher /:id/subjects filters dangling refs", teacherRoutes.includes("subjectsTeaching.filter(Boolean)"));
+check("modal reads axios res.data (not res.message)", !/alert\(res\.message/.test(read(path.join(frontend, "src", "components", "AssignSubjectModal.jsx"))));
+
+console.log("\n[16] Scheduled classes + Meet links reach Moodle");
+// Editing a class used to sync ONLY when it became cancelled, so a changed
+// date/time/teacher (or a link attached later) never reached Moodle.
+check("updateSession pushes non-cancel edits to Moodle", /Every non-cancel edit must also reach Moodle/.test(sched) && /CLASS_SYNC_ACTIONS\.UPDATED/.test(sched));
+check("updateSession only syncs once per branch", /else \{\s*\n\s*\/\/ Every non-cancel edit/.test(sched));
+// A pending Meet link must be repairable in one pass instead of by hand.
+check("backfillPendingMeetings exported", /export async function backfillPendingMeetings/.test(sched));
+check("backfill targets sessions with no link", /meetingStatus: \{ \$ne: "ready" \}/.test(sched) && /\$or: \[\{ meetingLink: "" \}/.test(sched));
+check("backfill regenerates (which re-pushes to Moodle)", /regenerateMeeting\(s\._id/.test(sched));
+check("resyncAllClassSessionsToMoodle exported", /export async function resyncAllClassSessionsToMoodle/.test(sched));
+// regenerateMeeting used to DISCARD the sync result, so moodleEventId stayed null
+// on every session whose link was generated/re-generated (the normal path).
+check("regenerateMeeting persists moodleEventId", /moodleSync\?\.moodleEventId[\s\S]{0,200}session\.moodleEventId = moodleSync\.moodleEventId/.test(sched));
+check("regenerateMeeting persists moodleCourseId", /session\.moodleCourseId = moodleSync\.moodleCourseId/.test(sched));
+check("resync persists moodleEventId", /res\.moodleEventId[\s\S]{0,300}\$set: \{ moodleEventId: res\.moodleEventId/.test(sched));
+check("POST /admin/sessions/backfill-meetings exists", /router\.post\("\/sessions\/backfill-meetings", adminAuth/.test(adminRoutes));
+check("POST /admin/sessions/resync-moodle exists", /router\.post\("\/sessions\/resync-moodle", adminAuth/.test(adminRoutes));
+check("backfill reports Google connection state", /googleStatus\.connected = Boolean\(row\?\.encryptedRefreshToken\)/.test(adminRoutes));
+
+// Pushing a course calendar event to a person who is NOT enrolled in that course
+// means they see nothing at all in Moodle.
+check("assigning a teacher to a class group syncs Moodle enrolment", /syncClassGroupEnrollment[\s\S]{0,700}CLASS_GROUP_TEACHER_ASSIGNED/.test(adminRoutes));
+check("adding students to a class group syncs Moodle enrolment", /syncClassGroupEnrollment[\s\S]{0,700}CLASS_GROUP_STUDENTS_ADDED/.test(adminRoutes));
+check("saving weekly slots/teacher syncs Moodle enrolment", /syncClassGroupEnrollment\(\{\s*classGroupId:\s*group\._id\s*\}\)/.test(timetableSvc));
 
 console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
 process.exitCode = fail ? 1 : 0;
