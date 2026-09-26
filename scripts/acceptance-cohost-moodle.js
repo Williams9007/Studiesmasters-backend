@@ -223,6 +223,35 @@ check("deploy/ local plugin is not stale vs moodle-sso/",
   read(path.join(root, "..", "deploy", "studiesmasters_virtualclass", "version.php")) === vclassVersionPhp
   && fs.existsSync(path.join(root, "..", "deploy", "studiesmasters_virtualclass", "lib.php")));
 
+// ------------------------------- Push sync (user data -> Moodle) is switched on
+console.log("\n[17] User profile data actually reaches Moodle (push path)");
+const envExample = read(path.join(root, ".env.example"));
+check(".env.example ships MOODLE_AUTO_SYNC=true (edits must enqueue a sync)",
+  /MOODLE_AUTO_SYNC=true/.test(envExample));
+check(".env.example documents that the WS token must exist inside Moodle",
+  envExample.includes("Invalid token - token not found") && envExample.includes("Manage tokens"));
+check("server only attaches the autosync plugin when the flag is true",
+  read(path.join(root, "server.js")).includes('String(process.env.MOODLE_AUTO_SYNC || "false") === "true"'));
+const profileDiag = read(path.join(root, "scripts", "diagnose-moodle-profile-sync.js"));
+// Strip comments first: the diagnostic legitimately NAMES these functions in
+// its explanatory comments, and matching prose would be a false positive.
+const profileDiagCode = profileDiag
+  .split("\n")
+  .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*") && !l.trim().startsWith("/*"))
+  .join("\n");
+check("profile diagnostic is read-only (no sync/queue writer calls)",
+  !/createUser\(|updateUser\(|syncProfile\(|enqueue[A-Za-z]*\(/.test(profileDiagCode));
+check("profile diagnostic reads the live Moodle side for drift",
+  profileDiag.includes("core_user_get_users_by_field") && profileDiag.includes("core_webservice_get_site_info"));
+check("profile diagnostic compares more than email/name",
+  ["curriculum", "grade", "package", "subjects"].every((f) => profileDiag.includes(`${f}: `)));
+// updateUser is the ONLY backend writer of profile data, so its field list is
+// the contract. Guard against silently shrinking it again.
+const updateUserSrc = read(path.join(root, "services", "moodle", "updateUser.js"));
+check("updateUser pushes only the core fields (documented limitation)", /fields\.email|fields\.firstname|fields\.lastname/.test(updateUserSrc));
+check("updateUser returns not_provisioned rather than throwing when unlinked",
+  updateUserSrc.includes('reason: "not_provisioned"'));
+
 console.log(`\n=== RESULT: ${pass} passed, ${fail} failed ===`);
 
 // ------------------- Assignments on the main website + Moodle propagation
