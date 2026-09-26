@@ -320,14 +320,16 @@ router.post("/class-sync/:sessionId", adminLimiter, adminAuth, async (req, res) 
 });
 
 // ===========================================================================
-// Virtual Classroom launched FROM MOODLE
+// Virtual Classroom signed-request API
 // ---------------------------------------------------------------------------
-// These endpoints are called by the Moodle "studiesmasters_virtualclass" local
-// plugin. Moodle cannot hold a JWT, so each request is an SSO-style signed
-// payload (username|email|timestamp|nonce|course) verified against the shared
-// secret. The signed username resolves to the Mongo principal, and the backend
-// re-applies enrollment/assignment gates before returning any Meet link.
-// All operations reuse the existing scheduling/attendance/notify services.
+// NOTE: these were originally called by the Moodle "studiesmasters_virtualclass"
+// local plugin, which has since been removed. They stay live because the nonce /
+// MoodleLink identity resolution in classPortal.service.js is shared with the
+// other Moodle sync paths. Moodle cannot hold a JWT, so each request is an
+// SSO-style signed payload (username|email|timestamp|nonce|course) verified
+// against the shared secret. The signed username resolves to the Mongo
+// principal, and the backend re-applies enrollment/assignment gates before
+// returning any Meet link.
 // ===========================================================================
 const ssoClassLimiter = rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false });
 

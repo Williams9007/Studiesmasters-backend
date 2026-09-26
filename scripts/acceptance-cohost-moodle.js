@@ -128,21 +128,11 @@ check("eventBody prefers substitute teacher", syncTimetable.includes("session.su
 const moodleCfg = read(path.join(root, "services", "moodle", "config.js"));
 check("WS auto-enabled by MOODLE_WS_TOKEN", /MOODLE_WS_TOKEN/.test(moodleCfg) && /wsEnabled: \(\(\) =>/.test(moodleCfg));
 
-console.log("\n[11] Moodle plugin page renders every view it calls");
-const plugin = read(path.join(root, "..", "moodle-sso", "local", "studiesmasters_virtualclass", "index.php"));
-check("vc_header defined (header() collision removed)", plugin.includes("function vc_header(") && !/function header\s*\(/.test(plugin));
-check("vc_footer defined", plugin.includes("function vc_footer("));
-check("vc_render_dashboard defined", plugin.includes("function vc_render_dashboard("));
-check("vc_render_waiting defined", plugin.includes("function vc_render_waiting("));
-check("vc_render_recordings defined", plugin.includes("function vc_render_recordings("));
-check("vc_render_attendance defined", plugin.includes("function vc_render_attendance("));
-check("call_backend keeps waiting/meeting/rows keys", plugin.includes("$out = $res;"));
-check("dispatch handles waiting room", plugin.includes("isset($res['waiting'])") || plugin.includes("!empty($res['waiting'])"));
-check("plugin renders Open Meet Link from dashboard", plugin.includes("Open Meet Link") && plugin.includes("$s['meetingLink']"));
-check("plugin surfaces backend errors", plugin.includes("alert-danger") && plugin.includes("$res['success']"));
-
-// ------------------------------- Moodle vclass nonce contract + theme chrome
-console.log("\n[12] vclass: plugin-minted nonce admitted once; theme chrome restored");
+// ------------------------------------------- Moodle vclass nonce contract
+// NOTE: the Moodle-side "StudiesMasters Virtual Classroom" local plugin and its
+// /my/ dashboard block have been removed (teardown), so the assertions below now
+// cover only the backend contract that the web front end still relies on.
+console.log("\n[12] vclass: nonce contract (backend)");
 const vclassStore = read(path.join(root, "services", "moodle", "store.js"));
 check("store exports reserveNonce (first-sight admission)", vclassStore.includes("export async function reserveNonce") && /export const store = \{[^}]*reserveNonce/.test(vclassStore));
 check("reserveNonce is atomic (Redis NX + Mongo duplicate-key)", /NX:\s*true/.test(vclassStore) && (vclassStore.includes("11000") || /duplicate/i.test(vclassStore)));
@@ -151,21 +141,6 @@ check("claimNonce leaves a used-tombstone on Redis consume", vclassStore.include
 check("verifyClassRequest reserves never-seen nonces", classPortal.includes("reserveNonce(") && /nonce_\$\{/.test(classPortal));
 check("verifyClassRequest rejects usernames with no principal", classPortal.includes('"unknown_user"'));
 check("link resolved before nonce gate (reserve has an owner)", classPortal.indexOf("MoodleLink.findOne({ moodleUsername") < classPortal.indexOf("reserveNonce({"));
-check("plugin mints a fresh nonce per backend call", plugin.includes("bin2hex(random_bytes(16))"));
-check("plugin sets page url before any output", plugin.indexOf("$PAGE->set_url") > -1 && plugin.indexOf("$PAGE->set_url") < plugin.indexOf("vc_header($role)"));
-check("plugin uses native theme header/footer", plugin.includes("$OUTPUT->header()") && plugin.includes("$OUTPUT->footer()"));
-check("plugin registers css via requires->css (no raw link echo)", plugin.includes("requires->css") && !/echo '<link rel=/.test(plugin));
-const vclassVersionPhp = read(path.join(root, "..", "moodle-sso", "local", "studiesmasters_virtualclass", "version.php"));
-const vclassVersion = Number((vclassVersionPhp.match(/\$plugin->version\s*=\s*(\d+)/) || [])[1] || 0);
-check(`plugin version >= 2026092303 for redeploy (got ${vclassVersion})`, vclassVersion >= 2026092303);
-
-// ------------------------------------------- Nav drawer entry point (lib.php)
-console.log("\n[13] vclass: nav drawer entry point (lib.php callback)");
-const vclassLib = read(path.join(root, "..", "moodle-sso", "local", "studiesmasters_virtualclass", "lib.php"));
-check("lib.php defines the extend_navigation callback", /function local_studiesmasters_virtualclass_extend_navigation\(global_navigation \$navigation\)/.test(vclassLib));
-check("lib.php is Moodle-guarded", vclassLib.includes("defined('MOODLE_INTERNAL') || die"));
-check("nav link targets the plugin index with pluginname string", vclassLib.includes("get_string('pluginname', 'local_studiesmasters_virtualclass')") && vclassLib.includes("/local/studiesmasters_virtualclass/index.php"));
-check("nav hidden for non-SSO accounts (sm_s_/sm_t_ only)", vclassLib.includes("sm_t_") && vclassLib.includes("sm_s_"));
 
 // ------------------------------------------- SSO name sync (main-website names)
 console.log("\n[14] SSO login refreshes names from verify fullName + legacy name");
@@ -195,8 +170,6 @@ check("heal realigns username drift only when the username is unowned",
   classPortal.includes("const taken = await MoodleLink.findOne({ moodleUsername: username })"));
 check("unlinked account still rejected when no principal matches",
   classPortal.includes('reason: "unknown_user"'));
-check("plugin turns unknown_user into an actionable message",
-  plugin.includes("unknown_user") && plugin.includes("not linked to a StudiesMasters account"));
 const diagnose = read(path.join(root, "scripts", "diagnose-vclass-user.js"));
 check("diagnostic reports both gates", diagnose.includes("GATE 1 FAILED") && diagnose.includes("GATE 2 FAILED"));
 check("diagnostic is read-only (never writes)", !/MoodleLink\.(create|updateOne|deleteOne|insertMany)/.test(diagnose));
@@ -204,24 +177,30 @@ const fixLink = read(path.join(root, "scripts", "fix-vclass-link.js"));
 check("repair script defaults to dry-run", fixLink.includes('const APPLY = flag("apply")'));
 check("repair script can rename the Moodle account", fixLink.includes("--rename-moodle") && fixLink.includes("client.updateUser(link.moodleUserId, { username: canonical })"));
 
-// --------------------------------------- Dashboard block ships + bulk add CLI
-console.log("\n[16] Dashboard block is deployable and reaches /my/ without manual steps");
-const blockDir = path.join(root, "..", "moodle-sso", "blocks", "studiesmasters_virtualclass");
-const deployBlock = path.join(root, "..", "deploy", "blocks", "studiesmasters_virtualclass");
-check("block ships in deploy/ (not only in moodle-sso/)", fs.existsSync(path.join(deployBlock, "block_studiesmasters_virtualclass.php")));
-check("block lang + version ship in deploy/", fs.existsSync(path.join(deployBlock, "version.php")) && fs.existsSync(path.join(deployBlock, "lang", "en", "block_studiesmasters_virtualclass.php")));
-const blockCode = read(path.join(blockDir, "block_studiesmasters_virtualclass.php"));
-check("block has a cURL path (allow_url_fopen may be off)", blockCode.includes("curl_init") && blockCode.includes("vc_block_http_get"));
-check("block renders a distinct unlinked-account message", blockCode.includes("account_not_linked"));
-check("block classes have a stylesheet", fs.existsSync(path.join(blockDir, "styles.css")) && fs.existsSync(path.join(blockDir, "styles.php")));
-const cli = read(path.join(root, "..", "moodle-sso", "cli", "add_studiesmasters_dashboard_block.php"));
-check("bulk-add CLI inserts block_instances on user-dashboard", cli.includes("'blockname' => 'studiesmasters_virtualclass'") && cli.includes("'pagetypepattern' => $pagetype"));
-check("bulk-add CLI defaults to dry-run and supports --remove", cli.includes("--dry-run") && cli.includes("--remove"));
-check("bulk-add CLI only targets SSO usernames", cli.includes("sm_s_") && cli.includes("sm_t_"));
-check("bulk-add CLI ships in deploy/cli", fs.existsSync(path.join(root, "..", "deploy", "cli", "add_studiesmasters_dashboard_block.php")));
-check("deploy/ local plugin is not stale vs moodle-sso/",
-  read(path.join(root, "..", "deploy", "studiesmasters_virtualclass", "version.php")) === vclassVersionPhp
-  && fs.existsSync(path.join(root, "..", "deploy", "studiesmasters_virtualclass", "lib.php")));
+// ------------------------------- Virtual Classroom is torn down of the dashboard
+// The "StudiesMasters Virtual Classroom" local plugin (launcher page + nav-drawer
+// entry) and its /my/ dashboard block have been removed from the repo. The backend
+// vclass API stays: the StudiesMasters web front end still uses it.
+console.log("\n[16] Virtual Classroom is no longer shipped to Moodle");
+const moodleSsoDir = path.join(root, "..", "moodle-sso");
+const deployDir = path.join(root, "..", "deploy");
+check("local_studiesmasters_virtualclass plugin is gone",
+  !fs.existsSync(path.join(moodleSsoDir, "local", "studiesmasters_virtualclass")));
+check("block_studiesmasters_virtualclass is gone",
+  !fs.existsSync(path.join(moodleSsoDir, "blocks", "studiesmasters_virtualclass")));
+check("bulk-add dashboard CLI is gone",
+  !fs.existsSync(path.join(moodleSsoDir, "cli", "add_studiesmasters_dashboard_block.php")));
+check("no stale deploy/ copies remain",
+  !fs.existsSync(path.join(deployDir, "studiesmasters_virtualclass"))
+  && !fs.existsSync(path.join(deployDir, "blocks"))
+  && !fs.existsSync(path.join(deployDir, "cli")));
+check("SSO plugin survives the teardown",
+  fs.existsSync(path.join(moodleSsoDir, "local", "studiesmasters_sso", "sso.php")));
+check("README no longer documents the dashboard block install",
+  !read(path.join(moodleSsoDir, "README.md")).includes("## Main Moodle dashboard"));
+check("backend vclass API is untouched (web front end still needs it)",
+  fs.existsSync(path.join(root, "services", "moodle", "classPortal.service.js"))
+  && /router\.get\("\/vclass\/dashboard"/.test(read(path.join(root, "routes", "moodleRoutes.js"))));
 
 // ------------------------------- Push sync (user data -> Moodle) is switched on
 console.log("\n[17] User profile data actually reaches Moodle (push path)");
