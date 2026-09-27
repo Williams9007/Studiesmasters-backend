@@ -19,6 +19,9 @@ import ClassSession from "../models/ClassSession.js";
 import Timetable from "../models/Timetable.js";
 // Middleware
 import { verifyTurnstile } from "../middleware/verifyTurnstile.js";
+// Dashboard reads are also consumed by the Moodle presentation layer, so they
+// require the caller to prove the identity it is asking for.
+import { dashboardReadAuth } from "../middleware/dashboardAuth.js";
 import { createPasswordResetToken, hashPasswordResetToken, sendPasswordResetEmail } from "../utils/passwordReset.js";
 import { adminAuth } from "../middleware/adminAuth.js";
 
@@ -243,7 +246,7 @@ router.post("/quizzes/class-group", async (req, res) => {
   }
 });
 
-router.get("/:id/subjects", async (req, res) => {
+router.get("/:id/subjects", dashboardReadAuth({ role: "teacher", idParam: "id", label: "teacher subjects" }), async (req, res) => {
   try {
     // `subjectsTeaching` is an array of ObjectId refs. Selecting it WITHOUT
     // populating returned raw ids, so the teacher dashboard (and the timetable
@@ -382,7 +385,7 @@ router.post("/teacher/broadcast", async (req, res) => {
 });
 
 // 🔹 GET /teacher/broadcasts/:teacherId
-router.get("/teacher/broadcasts/:teacherId", async (req, res) => {
+router.get("/teacher/broadcasts/:teacherId", dashboardReadAuth({ role: "teacher", idParam: "teacherId", label: "teacher broadcasts" }), async (req, res) => {
   try {
     const broadcasts = await Broadcast.find({ teacher: req.params.teacherId })
       .populate("subjectId", "name")
@@ -464,7 +467,7 @@ router.get("/:id/students", async (req, res) => {
  * This week's classes (Mon–Sun) where the teacher is the main teacher OR the
  * substitute — all statuses, so the dashboard calendar shows the full week.
  */
-router.get("/:id/timetable", async (req, res) => {
+router.get("/:id/timetable", dashboardReadAuth({ role: "teacher", idParam: "id", label: "teacher timetable" }), async (req, res) => {
   try {
     const { id } = req.params;
     const now = new Date();
@@ -633,7 +636,7 @@ router.post("/:id/timetables", async (req, res) => {
  * so this is the single merged record regardless of where the class was
  * attended or taught.
  */
-router.get("/:id/performance", async (req, res) => {
+router.get("/:id/performance", dashboardReadAuth({ role: "teacher", idParam: "id", label: "teacher performance" }), async (req, res) => {
   try {
     const { id } = req.params;
     const groups = await ClassGroup.find({ teacher: id }).populate("students", "fullName").lean();
@@ -710,7 +713,7 @@ import {
 } from "../services/qao/notification.service.js";
 import { emitToTeacher, emitToQaos } from "../services/qao/notify.js";
 
-router.get("/:id/notifications", async (req, res) => {
+router.get("/:id/notifications", dashboardReadAuth({ role: "teacher", idParam: "id", label: "teacher notifications" }), async (req, res) => {
   try {
     const { id } = req.params;
     const { limit } = req.query;

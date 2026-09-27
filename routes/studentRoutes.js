@@ -17,6 +17,9 @@ import ClassSession from "../models/ClassSession.js";
 import ClassGroup from "../models/ClassGroup.js";
 import { sendWelcomeEmail } from "../message/sendWelcomeEmail.js";
 import { studentAuth } from "../middleware/studentAuth.js";
+// Dashboard reads are also consumed by the Moodle presentation layer, so they
+// require the caller to prove the identity it is asking for.
+import { dashboardReadAuth } from "../middleware/dashboardAuth.js";
 import { verifyTurnstile } from "../middleware/verifyTurnstile.js";
 import { curriculumCatalog } from "../data/curriculumCatalog.js";
 import { createPasswordResetToken, hashPasswordResetToken, sendPasswordResetEmail } from "../utils/passwordReset.js";
@@ -230,7 +233,7 @@ router.post("/register", async (req, res) => {
       return res.status(500).json({ message: "Server configuration error (JWT secret not set)" });
     }
 
-    const token = jwt.sign({ id: student._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
+    const token = jwt.sign({ id: student._id, role: "student" }, process.env.JWT_SECRET, { expiresIn: "7d" });
     console.log("[Registration] Student registration completed successfully");
     res.status(201).json({
       message: "✅ Student registered successfully",
@@ -305,7 +308,7 @@ router.post("/login", verifyTurnstile, authLimiter, async (req, res) => {
 
     if (!(await bcrypt.compare(password, student.password))) return res.status(400).json({ message: "Invalid email or password" });
 
-    const token = jwt.sign({ id: student._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
+    const token = jwt.sign({ id: student._id, role: "student" }, process.env.JWT_SECRET, { expiresIn: "7d" });
     res.json({ message: "Login successful", user: student, token });
 
   } catch (err) {
@@ -327,7 +330,7 @@ router.get("/me", studentAuth, async (req, res) => {
 });
 
 /* ==================== STUDENT SUBJECTS ==================== */
-router.get("/:studentId/subjects", async (req, res) => {
+router.get("/:studentId/subjects", dashboardReadAuth({ role: "student", idParam: "studentId", label: "student subjects" }), async (req, res) => {
   try {
     const student = await Student.findById(req.params.studentId).populate("subjectsEnrolled", "name package grade price moodleCourseId");
     if (!student) return res.status(404).json({ message: "Student not found" });
@@ -410,7 +413,7 @@ router.get("/notifications/:studentId/unread-count", async (req, res) => {
  * to a broader query. Every event carries its originating `classGroupId` so a
  * client can assert the event belongs to an assigned group before rendering.
  */
-router.get("/:studentId/timetable", studentAuth, requireStudentSelf, async (req, res) => {
+router.get("/:studentId/timetable", dashboardReadAuth({ role: "student", idParam: "studentId", label: "student timetable" }), async (req, res) => {
   try {
     const { studentId } = req.params;
 
@@ -469,7 +472,7 @@ router.get("/:studentId/timetable", studentAuth, requireStudentSelf, async (req,
 });
 
 /** GET /api/students/:studentId/notifications */
-router.get("/:studentId/notifications", studentAuth, requireStudentSelf, async (req, res) => {
+router.get("/:studentId/notifications", dashboardReadAuth({ role: "student", idParam: "studentId", label: "student notifications" }), async (req, res) => {
   try {
     const { studentId } = req.params;
     const { role, limit } = req.query;
@@ -546,7 +549,7 @@ router.delete("/:studentId/notifications", studentAuth, requireStudentSelf, asyn
     res.status(500).json({ success: false, message: "Failed to clear notifications" });
   }
 });
-router.get("/broadcasts/:studentId", async (req, res) => {
+router.get("/broadcasts/:studentId", dashboardReadAuth({ role: "student", idParam: "studentId", label: "student broadcasts" }), async (req, res) => {
   try {
     const { studentId } = req.params;
     const broadcasts = await Broadcast.find({

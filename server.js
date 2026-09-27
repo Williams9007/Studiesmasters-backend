@@ -52,6 +52,7 @@ import mongoose from "mongoose";
 import connectDB from "./config/db.js";
 import { init as initSystemGuard } from "./services/systemGuard.js";
 import { initSystemAlerts, sendSystemAlert } from "./services/systemAlertService.js";
+import { dashboardAuthSummary } from "./services/moodle/dashboardAuth.js";
 import systemGuardRoutes from "./routes/systemGuardRoutes.js";
 import { joinRoleRooms, handshakeIdentity } from "./utils/socketRooms.js";
 
@@ -304,6 +305,13 @@ app.get("/health", (req, res) => {
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
   });
+});
+
+// Auth capability of the Moodle dashboard read API. Exposes ONLY non-secret
+// state (mode, whether a token is configured, nonce store) so the Moodle side
+// can be diagnosed without ever revealing the token.
+app.get("/health/dashboard-auth", (req, res) => {
+  res.json({ success: true, ...dashboardAuthSummary() });
 });
 
 // ==========================
