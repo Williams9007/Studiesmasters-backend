@@ -97,6 +97,23 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+
+    // Pending email change. The token is emailed to the NEW address and must be
+    // confirmed there before the account email is swapped — otherwise any
+    // logged-in user could hand their account to an attacker by typing a
+    // stranger's address with no proof of ownership.
+    pendingEmail: {
+      type: String,
+      default: null,
+    },
+    emailChangeToken: {
+      type: String,
+      default: null,
+    },
+    emailChangeExpires: {
+      type: Date,
+      default: null,
+    },
   },
   { timestamps: true }
 );

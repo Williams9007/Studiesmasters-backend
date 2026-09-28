@@ -1,5 +1,9 @@
+import express from "express";
 import multer from "multer";
 import path from "path";
+import Payment from "../models/Payment.js";
+
+const router = express.Router();
 
 // Multer setup for proof upload
 const storage = multer.diskStorage({
@@ -41,3 +45,5 @@ router.post("/renew-payment/:studentId", upload.single("proofImage"), async (req
     res.status(500).json({ message: "Server error during payment renewal" });
   }
 });
+
+export default router;

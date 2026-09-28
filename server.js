@@ -77,6 +77,9 @@ import googleRoutes from "./routes/googleRoutes.js";
 import googleTeacherRoutes from "./routes/googleTeacherRoutes.js";
 import recordingRoutes from "./routes/recordingRoutes.js";
 import streamRoutes from "./routes/streamRoutes.js";
+import freeTrialRoutes from "./routes/freeTrialRoutes.js";
+import helpRoutes from "./routes/helpRoutes.js";
+import roleRoutes from "./routes/roleRoutes.js";
 
 // ==========================
 // VALIDATE ENV VARIABLES
@@ -115,6 +118,9 @@ if (missingMoodleEnv.length) {
 const app = express();
 const httpServer = createServer(app);
 
+// On Render and reverse proxies, express-rate-limit and req.ip require trust proxy
+app.set("trust proxy", 1);
+
 // ==========================
 // CORS CONFIG
 // ==========================
@@ -122,6 +128,8 @@ const allowedOrigins = [
   "http://localhost:5000",
   "http://localhost:5173",
   "http://localhost:5174",
+  // Allow dynamically configured FRONTEND_URL if set in production
+  ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL.replace(/\/$/, "")] : []),
   // The System Guard page is served by this API and makes authenticated API calls itself.
   "https://studiesmasters-backend.onrender.com",
   "https://studiesmasters-frontend.onrender.com",
@@ -240,6 +248,7 @@ app.use("/api/students", studentRoutes);
 app.use("/api/students", authRoutes);
 app.use("/api/teachers", teacherRoutes);
 app.use("/api/teachers", authRoutes);
+app.use("/api/auth", authRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/subjects", subjectRoutes);
@@ -257,6 +266,12 @@ app.use("/api/google/oauth", googleRoutes);
 app.use("/api/google/teacher", googleTeacherRoutes);
 app.use("/api/recordings", recordingRoutes);
 app.use("/api/stream", streamRoutes);
+// Public lead capture from the marketing site + admin follow-up endpoints.
+app.use("/api/free-trial", freeTrialRoutes);
+app.use("/api/help", helpRoutes);
+// Mounted here because authRoutes.js is shared by /api/students and
+// /api/teachers; this is the only place the generic role router belongs.
+app.use("/api/role", roleRoutes);
 
 app.get("/", (req, res) => {
   res.send("ðŸš€ Studiesmasters API is running");
