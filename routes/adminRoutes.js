@@ -559,6 +559,29 @@ router.get("/qao-users", adminAuth, async (req, res) => {
 });
 
 // ================= ALL USERS (UNIFIED) =================
+/**
+ * Subscription plan + add-ons for a student, resolved from their payment
+ * history. The plan a student picks at signup/checkout is stored on the Payment
+ * (`package`) together with any add-ons they ticked (`addOns`), and is only
+ * mirrored onto the Student for some flows — so the payment record is treated as
+ * the source of truth. The most recent CONFIRMED payment wins; anything else is
+ * a fallback so a real plan is never reported as "Not set".
+ */
+const studentSubscription = (student, history = []) => {
+  const records = Array.isArray(history) ? history : [];
+  const confirmed = records.filter((p) => p && p.status === "confirmed");
+  const current = confirmed[0] || records[0] || null;
+  const clean = (list) => [...new Set((list || []).map((name) => String(name || "").trim()).filter(Boolean))];
+  return {
+    studentId: student.userId || "",
+    subscriptionPlan: student.selectedPlan || student.package || current?.package || "",
+    addOns: clean(current?.addOns),
+    allAddOns: clean(records.flatMap((p) => p.addOns || [])),
+    paymentStatus: current?.status || "",
+    lastPaymentAt: current?.transactionDate || current?.createdAt || null,
+  };
+};
+
 router.get("/users", adminAuth, async (req, res) => {
   try {
     const students = await Student.find().select("_id fullName email status createdAt userId selectedPlan package");
@@ -566,8 +589,23 @@ router.get("/users", adminAuth, async (req, res) => {
     const qaos = await QaoUser.find().select("_id fullName email status createdAt");
     const admins = await Admin.find().select("_id fullName email createdAt");
 
+    // Join every student's payments in one query so the Users list can show the
+    // plan they signed up for and the add-ons they bought (no N+1).
+    const payments = students.length
+      ? await Payment.find({ studentId: { $in: students.map((s) => s._id) } })
+        .select("studentId package addOns amount status paymentPurpose transactionDate createdAt")
+        .sort({ transactionDate: -1, createdAt: -1 })
+        .lean()
+      : [];
+    const paymentsByStudent = new Map();
+    for (const payment of payments) {
+      const key = String(payment.studentId);
+      if (!paymentsByStudent.has(key)) paymentsByStudent.set(key, []);
+      paymentsByStudent.get(key).push(payment);
+    }
+
     const formattedUsers = [
-      ...students.map(u => ({ ...u.toObject(), role: "student", name: u.fullName, studentId: u.userId, subscriptionPlan: u.selectedPlan || u.package || "" })),
+      ...students.map(u => ({ ...u.toObject(), role: "student", name: u.fullName, ...studentSubscription(u, paymentsByStudent.get(String(u._id)) || []) })),
       ...teachers.map(u => ({ ...u.toObject(), role: "teacher", name: u.fullName })),
       ...qaos.map(u => ({ ...u.toObject(), role: "qao", name: u.fullName })),
       ...admins.map(u => ({ ...u.toObject(), role: "admin", name: u.fullName, status: "active" })),
@@ -607,7 +645,18 @@ router.get("/users/:id/:role", adminAuth, async (req, res) => {
 
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    res.json({ success: true, user });
+    // Students: also return the plan + add-ons recorded on their payments so the
+    // admin profile shows the same subscription the student signed up for.
+    let subscription = null;
+    if (role.toLowerCase() === "student") {
+      const history = await Payment.find({ studentId: user._id })
+        .select("package addOns amount status paymentPurpose transactionDate createdAt")
+        .sort({ transactionDate: -1, createdAt: -1 })
+        .lean();
+      subscription = { ...studentSubscription(user, history), payments: history };
+    }
+
+    res.json({ success: true, user, subscription });
   } catch (err) {
     console.error("❌ Error fetching user:", err);
     res.status(500).json({ message: "Failed to fetch user" });
@@ -819,6 +868,12 @@ router.put("/payments/:id/confirm", adminAuth, async (req, res) => {
       student.accountStatus = "active";
       student.subscriptionExpiry = endDate;
       student.status = "active";
+      // Mirror the plan that was paid for onto the student so the admin Users
+      // list and the student's own dashboard agree on the subscription.
+      if (payment.package) {
+        student.package = payment.package;
+        student.selectedPlan = payment.package;
+      }
       await student.save();
     }
 
