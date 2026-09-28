@@ -212,8 +212,11 @@ router.get("/performance", adminAuth, async (req, res) => {
       .populate("teacher", "fullName")
       .populate("students", "fullName")
       .lean();
+    // Sessions are pulled with their date/time so the admin can tell WHEN the
+    // Tutor Manager's classes actually ran, not just how many ran.
     const sessions = await ClassSession.find({ status: { $in: ["completed", "live"] } })
-      .select("classGroup attendance")
+      .select("classGroup attendance date startTime endTime status")
+      .sort({ date: 1 })
       .lean();
 
     const byGroup = new Map();
@@ -223,16 +226,38 @@ router.get("/performance", adminAuth, async (req, res) => {
       byGroup.get(key).push(s);
     }
 
+    // Earliest / latest session in a group. Sessions are pre-sorted ascending, so
+    // index 0 is the first class and the last index is the most recent one.
+    const sessionWindow = (list) => {
+      const first = list[0] || null;
+      const last = list.length ? list[list.length - 1] : null;
+      const toSession = (s) => (s ? { date: s.date, startTime: s.startTime || "", endTime: s.endTime || "", status: s.status || "" } : null);
+      return {
+        firstSessionDate: first?.date || null,
+        lastSessionDate: last?.date || null,
+        firstSession: toSession(first),
+        lastSession: toSession(last),
+        // Every date the class actually met (de-duplicated, chronological).
+        sessionDates: [...new Set(list.map((s) => (s.date ? new Date(s.date).toISOString() : null)).filter(Boolean))],
+      };
+    };
+
     const teachers = [];
     const students = [];
     for (const g of groups) {
       const groupSessions = byGroup.get(String(g._id)) || [];
       const total = groupSessions.length;
+      const timeline = sessionWindow(groupSessions);
       if (g.teacher) {
         let joins = 0;
         let minutes = 0;
+        let lastAttendanceAt = null;
         for (const s of groupSessions) {
-          for (const a of s.attendance || []) { joins += 1; minutes += a.duration || 0; }
+          for (const a of s.attendance || []) {
+            joins += 1;
+            minutes += a.duration || 0;
+            if (a.joinedAt && (!lastAttendanceAt || a.joinedAt > lastAttendanceAt)) lastAttendanceAt = a.joinedAt;
+          }
         }
         teachers.push({
           teacherId: g.teacher._id,
@@ -244,14 +269,21 @@ router.get("/performance", adminAuth, async (req, res) => {
           completedSessions: total,
           attendanceJoins: joins,
           minutes,
+          lastAttendanceAt,
+          ...timeline,
         });
       }
       for (const st of g.students || []) {
         let attended = 0;
         let minutes = 0;
+        let lastAttendanceAt = null;
         for (const s of groupSessions) {
           const rec = (s.attendance || []).find((a) => String(a.student) === String(st._id));
-          if (rec) { attended += 1; minutes += rec.duration || 0; }
+          if (rec) {
+            attended += 1;
+            minutes += rec.duration || 0;
+            if (rec.joinedAt && (!lastAttendanceAt || rec.joinedAt > lastAttendanceAt)) lastAttendanceAt = rec.joinedAt;
+          }
         }
         students.push({
           studentId: st._id,
@@ -262,6 +294,8 @@ router.get("/performance", adminAuth, async (req, res) => {
           attended,
           attendancePct: total ? Math.round((attended / total) * 100) : 0,
           minutes,
+          lastAttendanceAt,
+          ...timeline,
         });
       }
     }
@@ -527,13 +561,13 @@ router.get("/qao-users", adminAuth, async (req, res) => {
 // ================= ALL USERS (UNIFIED) =================
 router.get("/users", adminAuth, async (req, res) => {
   try {
-    const students = await Student.find().select("_id fullName email status createdAt");
+    const students = await Student.find().select("_id fullName email status createdAt userId selectedPlan package");
     const teachers = await Teacher.find().select("_id fullName email status createdAt");
     const qaos = await QaoUser.find().select("_id fullName email status createdAt");
     const admins = await Admin.find().select("_id fullName email createdAt");
 
     const formattedUsers = [
-      ...students.map(u => ({ ...u.toObject(), role: "student", name: u.fullName })),
+      ...students.map(u => ({ ...u.toObject(), role: "student", name: u.fullName, studentId: u.userId, subscriptionPlan: u.selectedPlan || u.package || "" })),
       ...teachers.map(u => ({ ...u.toObject(), role: "teacher", name: u.fullName })),
       ...qaos.map(u => ({ ...u.toObject(), role: "qao", name: u.fullName })),
       ...admins.map(u => ({ ...u.toObject(), role: "admin", name: u.fullName, status: "active" })),
@@ -811,11 +845,24 @@ router.put("/payments/:id/confirm", adminAuth, async (req, res) => {
 // ================= CLASS GROUPS =================
 const CLASS_GROUP_SUBJECTS = ["English", "Maths", "Science"];
 
+// Shared admin shape for a class group. Also surfaces the subscription plan(s)
+// actually represented in the batch so grouping can be verified against what
+// each student paid for — not just curriculum/grade/subject.
+const formatAdminClassGroup = (group) => {
+  const obj = group && typeof group.toObject === "function" ? group.toObject() : { ...group };
+  const students = Array.isArray(obj.students) ? obj.students : [];
+  return {
+    ...obj,
+    studentCount: students.length,
+    plans: [...new Set(students.map((s) => (s && typeof s === "object" ? s.selectedPlan || s.package : null)).filter(Boolean))],
+  };
+};
+
 router.get("/class-groups/options", adminAuth, async (req, res) => {
   try {
     const [students, teachers] = await Promise.all([
       Student.find()
-        .select("_id fullName email phone curriculum grade subjectNames subjects subjectsEnrolled")
+        .select("_id userId fullName email phone curriculum grade subjectNames subjects subjectsEnrolled selectedPlan package")
         .populate("subjectsEnrolled", "name")
         .sort({ curriculum: 1, grade: 1, fullName: 1 })
         .lean(),
@@ -823,6 +870,8 @@ router.get("/class-groups/options", adminAuth, async (req, res) => {
     ]);
     const formattedStudents = students.map((student) => ({
       ...student,
+      // Customer-facing name of the student's current subscription plan.
+      plan: student.selectedPlan || student.package || "",
       subjectNames: student.subjectNames?.length
         ? student.subjectNames
         : student.subjects?.length
@@ -840,9 +889,9 @@ router.get("/class-groups", adminAuth, async (req, res) => {
   try {
     const groups = await ClassGroup.find()
       .populate("teacher", "fullName email")
-      .populate("students", "fullName email phone grade")
+      .populate("students", "userId fullName email phone grade selectedPlan package")
       .sort({ createdAt: -1 });
-    res.json({ groups: groups.map((group) => ({ ...group.toObject(), studentCount: group.students.length })) });
+    res.json({ groups: groups.map(formatAdminClassGroup) });
   } catch (error) {
     res.status(500).json({ message: "Unable to load class groups." });
   }
@@ -1112,7 +1161,7 @@ router.post("/class-groups/:id/students", adminAuth, validate(schemas.addStudent
     else if (group.status === "full") group.status = "active";
     await group.save();
 
-    const populated = await ClassGroup.findById(group._id).populate("teacher", "fullName email").populate("students", "fullName email phone grade");
+    const populated = await ClassGroup.findById(group._id).populate("teacher", "fullName email").populate("students", "userId fullName email phone grade selectedPlan package");
 
     // Enrol the newly added students in the class's Moodle course. Without this a
     // student is a member of the class on the main website but NOT in Moodle, so
@@ -1128,7 +1177,7 @@ router.post("/class-groups/:id/students", adminAuth, validate(schemas.addStudent
 
     await logAudit({ admin: req.admin, action: "CLASS_GROUP_STUDENTS_ADDED", resource: "ClassGroup", resourceId: group._id.toString(), details: { studentIds: newIds.map((id) => id.toString()), added: newIds.length, duplicates: duplicates, moodle }, req });
 
-    res.json({ message: `${newIds.length} student(s) added to ${group.code}.${duplicates ? ` ${duplicates} already existed.` : ""}`, group: populated, moodle });
+    res.json({ message: `${newIds.length} student(s) added to ${group.code}.${duplicates ? ` ${duplicates} already existed.` : ""}`, group: formatAdminClassGroup(populated), moodle });
   } catch (error) {
     console.error("Add students to group error:", error);
     res.status(500).json({ message: "Unable to add students to the group." });
@@ -1151,11 +1200,11 @@ router.delete("/class-groups/:id/students/:studentId", adminAuth, async (req, re
     if (group.status === "full" && group.students.length < group.capacity) group.status = "active";
     await group.save();
 
-    const populated = await ClassGroup.findById(group._id).populate("teacher", "fullName email").populate("students", "fullName email phone grade");
+    const populated = await ClassGroup.findById(group._id).populate("teacher", "fullName email").populate("students", "userId fullName email phone grade selectedPlan package");
 
     await logAudit({ admin: req.admin, action: "CLASS_GROUP_STUDENT_REMOVED", resource: "ClassGroup", resourceId: group._id.toString(), details: { studentId }, req });
 
-    res.json({ message: "Student removed from the group.", group: populated });
+    res.json({ message: "Student removed from the group.", group: formatAdminClassGroup(populated) });
   } catch (error) {
     console.error("Remove student from group error:", error);
     res.status(500).json({ message: "Unable to remove the student from the group." });
