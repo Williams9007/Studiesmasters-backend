@@ -585,7 +585,9 @@ const studentSubscription = (student, history = []) => {
 router.get("/users", adminAuth, async (req, res) => {
   try {
     const students = await Student.find().select("_id fullName email status createdAt userId selectedPlan package");
-    const teachers = await Teacher.find().select("_id fullName email status createdAt");
+    const teachers = await Teacher.find()
+      .select("_id fullName email status createdAt subjectsTeaching")
+      .populate("subjectsTeaching", "name curriculum grade package");
     const qaos = await QaoUser.find().select("_id fullName email status createdAt");
     const admins = await Admin.find().select("_id fullName email createdAt");
 
@@ -606,7 +608,17 @@ router.get("/users", adminAuth, async (req, res) => {
 
     const formattedUsers = [
       ...students.map(u => ({ ...u.toObject(), role: "student", name: u.fullName, ...studentSubscription(u, paymentsByStudent.get(String(u._id)) || []) })),
-      ...teachers.map(u => ({ ...u.toObject(), role: "teacher", name: u.fullName })),
+      ...teachers.map(u => {
+        // Subject assignments for the admin teacher table (names + context).
+        const subjects = (u.subjectsTeaching || []).filter(Boolean).map((s) => ({
+          _id: s?._id || null,
+          name: s?.name || "",
+          curriculum: s?.curriculum || "",
+          grade: s?.grade || "",
+          package: s?.package || "",
+        }));
+        return { ...u.toObject(), role: "teacher", name: u.fullName, subjects, subjectNames: subjects.map((s) => s.name).filter(Boolean) };
+      }),
       ...qaos.map(u => ({ ...u.toObject(), role: "qao", name: u.fullName })),
       ...admins.map(u => ({ ...u.toObject(), role: "admin", name: u.fullName, status: "active" })),
     ];
@@ -631,7 +643,7 @@ router.get("/users/:id/:role", adminAuth, async (req, res) => {
         user = await Student.findById(id);
         break;
       case "teacher":
-        user = await Teacher.findById(id);
+        user = await Teacher.findById(id).populate("subjectsTeaching", "name curriculum grade package price moodleCourseId");
         break;
       case "qao":
         user = await QaoUser.findById(id);
@@ -1232,6 +1244,197 @@ router.delete("/assign-subject/:teacherId/:subjectId", adminAuth, async (req, re
     res.status(500).json({ success: false, message: error.message || "Unable to unassign the subject." });
   }
 });
+
+// ================= TEACHER SUBJECT ASSIGNMENT (canonical, admin-protected) ===
+// GET   /api/admin/teachers/:teacherId/subjects -> the teacher's assigned subjects
+// PUT   /api/admin/teachers/:teacherId/subjects -> replace the whole assignment set
+// PATCH /api/admin/teachers/:teacherId/subjects -> alias of PUT
+//
+// Single source of truth for "which subjects does this teacher teach". Writes
+// Teacher.subjectsTeaching as Subject ObjectId references (never copies of the
+// subject, never Moodle-specific data), keeps the TeacherAssignment mirror rows
+// that services/moodle/syncProfile.js reads to resolve the teacher's Moodle
+// courses in step, then refreshes Moodle best-effort. Moodle is not modified.
+const isValidObjectId = (value) => /^[0-9a-fA-F]{24}$/.test(String(value || ""));
+
+// Loads a teacher with the assigned subjects populated (dangling refs dropped).
+const loadTeacherSubjects = async (teacherId) => {
+  const teacher = await Teacher.findById(teacherId)
+    .select("fullName name email userId curriculum subjectsTeaching")
+    .populate("subjectsTeaching", "name curriculum grade package price moodleCourseId")
+    .lean();
+  if (!teacher) return null;
+  teacher.subjectsTeaching = (teacher.subjectsTeaching || []).filter(Boolean);
+  return teacher;
+};
+
+// Rebuilds the Moodle course-mapping mirror rows for a teacher from a subject set.
+const syncTeacherAssignments = async (teacherId, subjects = []) => {
+  const TeacherAssignment = (await import("../models/TeacherAssignment.js")).default;
+  await TeacherAssignment.deleteMany({ teacherId });
+  if (!subjects.length) return;
+  await TeacherAssignment.insertMany(
+    subjects.map((s) => ({
+      teacherId,
+      curriculum: s.curriculum || "",
+      package: s.package || "N/A",
+      grade: s.grade || "N/A",
+      subject: s.name,
+    })),
+    { ordered: false }
+  ).catch(() => { /* duplicate rows must not fail the assignment */ });
+};
+
+router.get("/teachers/:teacherId/subjects", adminAuth, async (req, res) => {
+  try {
+    const { teacherId } = req.params;
+    if (!isValidObjectId(teacherId)) {
+      return res.status(400).json({ success: false, message: "Invalid teacher id." });
+    }
+    const teacher = await loadTeacherSubjects(teacherId);
+    if (!teacher) return res.status(404).json({ success: false, message: "Teacher not found." });
+
+    const subjects = teacher.subjectsTeaching || [];
+    res.json({
+      success: true,
+      teacher: {
+        _id: teacher._id,
+        fullName: teacher.fullName || teacher.name || "Teacher",
+        email: teacher.email,
+        userId: teacher.userId,
+        curriculum: teacher.curriculum,
+      },
+      subjectIds: subjects.map((s) => String(s._id)),
+      subjects,
+    });
+  } catch (error) {
+    console.error("Teacher subjects error:", error);
+    res.status(500).json({ success: false, message: "Unable to load the teacher's subjects." });
+  }
+});
+
+const updateTeacherSubjects = async (req, res) => {
+  try {
+    const { teacherId } = req.params;
+    if (!isValidObjectId(teacherId)) {
+      return res.status(400).json({ success: false, message: "Invalid teacher id." });
+    }
+
+    const teacher = await Teacher.findById(teacherId).select("fullName name email subjectsTeaching").lean();
+    if (!teacher) return res.status(404).json({ success: false, message: "Teacher not found." });
+
+    const raw = req.body?.subjects;
+    if (!Array.isArray(raw)) {
+      return res.status(400).json({ success: false, message: "`subjects` must be an array of subject ids." });
+    }
+
+    // Normalise: trim, drop blanks, reject malformed ids, remove duplicates.
+    const requested = [];
+    const seen = new Set();
+    for (const value of raw) {
+      const id = String(value ?? "").trim();
+      if (!id) continue;
+      if (!isValidObjectId(id)) {
+        return res.status(400).json({ success: false, message: `"${id}" is not a valid subject id.` });
+      }
+      if (seen.has(id)) continue; // prevent duplicate subject ids
+      seen.add(id);
+      requested.push(id);
+    }
+    const duplicatesRemoved = raw.length - requested.length;
+
+    // Every subject must already exist — never create a duplicate Subject here.
+    const subjectDocs = requested.length
+      ? await Subject.find({ _id: { $in: requested } }).select("name curriculum grade package price moodleCourseId").lean()
+      : [];
+    if (subjectDocs.length !== requested.length) {
+      const found = new Set(subjectDocs.map((s) => String(s._id)));
+      const missing = requested.filter((id) => !found.has(id));
+      return res.status(400).json({ success: false, message: `Unknown subject id(s): ${missing.join(", ")}.` });
+    }
+    // Subject.find does not preserve $in order — restore the caller's order.
+    const byId = new Map(subjectDocs.map((s) => [String(s._id), s]));
+    const ordered = requested.map((id) => byId.get(id));
+
+    // Names of what is being replaced, for the audit trail.
+    const previousIds = (teacher.subjectsTeaching || []).map((id) => String(id));
+    const previousDocs = previousIds.length
+      ? await Subject.find({ _id: { $in: previousIds } }).select("name").lean()
+      : [];
+    const previousNames = new Map(previousDocs.map((s) => [String(s._id), s.name]));
+
+    // 1) Main-website source of truth.
+    await Teacher.updateOne({ _id: teacherId }, { $set: { subjectsTeaching: ordered.map((s) => s._id) } });
+
+    // 2) Moodle course-resolution mirror + best-effort Moodle refresh.
+    let moodle = null;
+    try {
+      await syncTeacherAssignments(teacherId, ordered);
+      const { syncProfile } = await import("../services/moodle/syncProfile.js");
+      moodle = await syncProfile({ id: teacherId, role: "teacher", enroll: true, req });
+    } catch (moodleErr) {
+      moodle = { synced: false, reason: String(moodleErr?.message || moodleErr).slice(0, 200) };
+    }
+
+    // 3) Human-readable admin activity log: who changed what, and when.
+    const nextIds = ordered.map((s) => String(s._id));
+    const addedNames = ordered.filter((s) => !previousIds.includes(String(s._id))).map((s) => s.name);
+    const removedNames = previousIds.filter((id) => !nextIds.includes(id)).map((id) => previousNames.get(id) || id);
+    const teacherName = teacher.fullName || teacher.name || "Teacher";
+    const bullet = (names) => (names.length ? names.map((n) => `* ${n}`).join("\n") : "none");
+    const message = [
+      "Admin changed teacher subjects:",
+      `Teacher: ${teacherName}`,
+      `Removed: ${removedNames.length ? removedNames.join(", ") : "none"}`,
+      `Added: ${addedNames.length ? `\n${bullet(addedNames)}` : "none"}`,
+      `Date: ${new Date().toISOString()}`,
+    ].join("\n");
+
+    await logAudit({
+      admin: req.admin,
+      action: "TEACHER_SUBJECTS_UPDATED",
+      resource: "Teacher",
+      resourceId: String(teacherId),
+      details: {
+        teacherName,
+        added: addedNames,
+        removed: removedNames,
+        subjectIds: nextIds,
+        duplicatesRemoved,
+        message,
+        moodle,
+      },
+      req,
+    });
+
+    const updated = await loadTeacherSubjects(teacherId);
+    const subjects = updated?.subjectsTeaching || [];
+    res.json({
+      success: true,
+      message: `${subjects.length} subject${subjects.length === 1 ? "" : "s"} assigned to ${teacherName}.`,
+      teacher: {
+        _id: updated._id,
+        fullName: updated.fullName || updated.name || "Teacher",
+        email: updated.email,
+        userId: updated.userId,
+        curriculum: updated.curriculum,
+        subjectsTeaching: subjects.map((s) => s._id),
+      },
+      subjectIds: subjects.map((s) => String(s._id)),
+      subjects,
+      added: addedNames,
+      removed: removedNames,
+      duplicatesRemoved,
+      moodle,
+    });
+  } catch (error) {
+    console.error("Update teacher subjects error:", error);
+    res.status(500).json({ success: false, message: error.message || "Unable to update the teacher's subjects." });
+  }
+};
+
+router.put("/teachers/:teacherId/subjects", adminAuth, updateTeacherSubjects);
+router.patch("/teachers/:teacherId/subjects", adminAuth, updateTeacherSubjects);
 
 // ================= ADD STUDENTS TO CLASS GROUP =================
 router.post("/class-groups/:id/students", adminAuth, validate(schemas.addStudentsToGroup), async (req, res) => {

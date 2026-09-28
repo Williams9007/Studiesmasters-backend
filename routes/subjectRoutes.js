@@ -42,5 +42,24 @@ router.get("/by-package/:package", async (req, res) => {
     });
   }
 });
+/**
+ * @route   GET /api/subjects
+ * @desc    Fetch all subjects
+ * @access  Public
+ */
+router.get("/", async (req, res) => {
+  try {
+    const subjects = await Subject.find({}).sort({ package: 1, grade: 1, name: 1 }).lean();
+    res.status(200).json(subjects);
+  } catch (error) {
+    console.error("❌ Error fetching all subjects:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "Server error while fetching all subjects",
+      error: error.message,
+    });
+  }
+});
+
 
 export default router;
