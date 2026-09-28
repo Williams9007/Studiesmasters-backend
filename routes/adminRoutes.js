@@ -900,16 +900,44 @@ router.put("/payments/:id/confirm", adminAuth, async (req, res) => {
 // ================= CLASS GROUPS =================
 const CLASS_GROUP_SUBJECTS = ["English", "Maths", "Science"];
 
-// Shared admin shape for a class group. Also surfaces the subscription plan(s)
-// actually represented in the batch so grouping can be verified against what
-// each student paid for — not just curriculum/grade/subject.
-const formatAdminClassGroup = (group) => {
+/**
+ * Effective subscription plan per student, keyed by student id. Prefers the plan
+ * mirrored on the Student and falls back to the most recent CONFIRMED payment
+ * (`Payment.package`) — the same rule the Users screen uses — so plan-aware
+ * grouping also works for students whose plan was never mirrored.
+ */
+const planByStudentMap = async (studentDocs = []) => {
+  const ids = studentDocs.map((s) => s?._id).filter(Boolean);
+  const map = new Map();
+  if (!ids.length) return map;
+  const payments = await Payment.find({ studentId: { $in: ids }, status: "confirmed" })
+    .select("studentId package transactionDate createdAt")
+    .sort({ transactionDate: -1, createdAt: -1 })
+    .lean();
+  const paidPlan = new Map();
+  for (const payment of payments) {
+    const key = String(payment.studentId);
+    if (!paidPlan.has(key)) paidPlan.set(key, payment.package || "");
+  }
+  for (const student of studentDocs) {
+    const key = String(student._id);
+    map.set(key, String(student.selectedPlan || student.package || paidPlan.get(key) || "").trim());
+  }
+  return map;
+};
+
+// Shared admin shape for a class group. Surfaces the subscription plan the batch
+// was grouped for, plus the plan(s) the member students are actually on, so
+// grouping can be verified against what each student paid for.
+const formatAdminClassGroup = (group, planByStudent = new Map()) => {
   const obj = group && typeof group.toObject === "function" ? group.toObject() : { ...group };
   const students = Array.isArray(obj.students) ? obj.students : [];
+  const planOf = (s) => (s && typeof s === "object" ? String(s.selectedPlan || s.package || planByStudent.get(String(s._id)) || "").trim() : "");
   return {
     ...obj,
+    plan: String(obj.plan || "").trim(),
     studentCount: students.length,
-    plans: [...new Set(students.map((s) => (s && typeof s === "object" ? s.selectedPlan || s.package : null)).filter(Boolean))],
+    plans: [...new Set(students.map(planOf).filter(Boolean))],
   };
 };
 
@@ -923,17 +951,28 @@ router.get("/class-groups/options", adminAuth, async (req, res) => {
         .lean(),
       Teacher.find().select("_id fullName email curriculum").sort({ fullName: 1 }),
     ]);
+    // Resolve plans from confirmed payments when the field is missing on the
+    // student, so the plan filter works for every student.
+    const planByStudent = await planByStudentMap(students);
     const formattedStudents = students.map((student) => ({
       ...student,
       // Customer-facing name of the student's current subscription plan.
-      plan: student.selectedPlan || student.package || "",
+      plan: planByStudent.get(String(student._id)) || "",
       subjectNames: student.subjectNames?.length
         ? student.subjectNames
         : student.subjects?.length
           ? student.subjects
           : student.subjectsEnrolled.map((subject) => subject.name).filter(Boolean),
     }));
-    res.json({ students: formattedStudents, teachers, subjects: CLASS_GROUP_SUBJECTS });
+
+    // Distinct plans (with counts) so the UI can group by subscription plan.
+    const planCounts = formattedStudents.reduce((acc, student) => {
+      const key = student.plan || "No plan";
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+    res.json({ students: formattedStudents, teachers, subjects: CLASS_GROUP_SUBJECTS, plans: Object.keys(planCounts).sort(), planCounts });
   } catch (error) {
     console.error("Class group options error:", error);
     res.status(500).json({ message: "Unable to load students and teachers." });
@@ -946,7 +985,10 @@ router.get("/class-groups", adminAuth, async (req, res) => {
       .populate("teacher", "fullName email")
       .populate("students", "userId fullName email phone grade selectedPlan package")
       .sort({ createdAt: -1 });
-    res.json({ groups: groups.map(formatAdminClassGroup) });
+    // One payments lookup for every member student so the plan shown per group
+    // matches the plan they actually paid for.
+    const planByStudent = await planByStudentMap(groups.flatMap((group) => group.students || []));
+    res.json({ groups: groups.map((group) => formatAdminClassGroup(group, planByStudent)) });
   } catch (error) {
     res.status(500).json({ message: "Unable to load class groups." });
   }
@@ -954,14 +996,29 @@ router.get("/class-groups", adminAuth, async (req, res) => {
 
 router.post("/class-groups/generate", adminAuth, validate(schemas.classGroupGenerate), async (req, res) => {
   try {
-    const { curriculum, grade, subject, capacity, studentIds, codePrefix } = req.body;
+    const { curriculum, grade, subject, capacity, studentIds, codePrefix, plan = "" } = req.body;
     const size = Number(capacity);
+    const requestedPlan = String(plan || "").trim();
 
-    const students = await Student.find({ _id: { $in: studentIds } }).select("_id");
+    const students = await Student.find({ _id: { $in: studentIds } }).select("_id fullName selectedPlan package");
     if (students.length !== studentIds.length) {
       return res.status(400).json({ message: "One or more selected students could not be found. Refresh the list and try again." });
     }
     const matchedStudentIds = students.map((student) => student._id);
+
+    // Plan-aware grouping: when a plan is chosen, every selected student must be
+    // on that exact plan so a batch never mixes Starter/Standard/Premium.
+    if (requestedPlan) {
+      const planByStudent = await planByStudentMap(students);
+      const mismatched = students.filter((student) => (planByStudent.get(String(student._id)) || "").toLowerCase() !== requestedPlan.toLowerCase());
+      if (mismatched.length) {
+        const names = mismatched.slice(0, 3).map((student) => student.fullName || "Unknown student").join(", ");
+        return res.status(400).json({
+          message: `${mismatched.length} selected student(s) are not on the ${requestedPlan} plan (${names}${mismatched.length > 3 ? ", …" : ""}). Adjust the selection or choose "Any plan".`,
+        });
+      }
+    }
+
     const alreadyGrouped = await ClassGroup.findOne({
       curriculum,
       grade,
@@ -977,13 +1034,13 @@ router.post("/class-groups/generate", adminAuth, validate(schemas.classGroupGene
     for (let index = 0; index < students.length; index += size) {
       sequence += 1;
       const groupStudents = students.slice(index, index + size).map((student) => student._id);
-      groups.push({ code: `${codePrefix}${sequence}`.toUpperCase(), curriculum, grade, subject, capacity: size, students: groupStudents, status: groupStudents.length === size ? "full" : "active" });
+      groups.push({ code: `${codePrefix}${sequence}`.toUpperCase(), curriculum, grade, subject, plan: requestedPlan, capacity: size, students: groupStudents, status: groupStudents.length === size ? "full" : "active" });
     }
     const created = await ClassGroup.insertMany(groups);
 
-    await logAudit({ admin: req.admin, action: "CLASS_GROUPS_GENERATED", resource: "ClassGroup", details: { curriculum, grade, subject, count: created.length }, req });
+    await logAudit({ admin: req.admin, action: "CLASS_GROUPS_GENERATED", resource: "ClassGroup", details: { curriculum, grade, subject, plan: requestedPlan, count: created.length }, req });
 
-    res.status(201).json({ message: `${created.length} class group(s) created.`, groups: created });
+    res.status(201).json({ message: `${created.length} class group(s) created${requestedPlan ? ` for the ${requestedPlan} plan` : ""}.`, groups: created });
   } catch (error) {
     console.error("Class group generation error:", error);
     res.status(500).json({ message: "Unable to create class groups." });
@@ -1183,12 +1240,23 @@ router.post("/class-groups/:id/students", adminAuth, validate(schemas.addStudent
     const group = await ClassGroup.findById(req.params.id);
     if (!group) return res.status(404).json({ message: "Class group not found." });
 
-    const students = await Student.find({ _id: { $in: studentIds } }).select("_id");
+    const students = await Student.find({ _id: { $in: studentIds } }).select("_id fullName selectedPlan package");
     if (students.length !== studentIds.length) {
       return res.status(400).json({ message: "One or more selected students could not be found. Refresh the list and try again." });
     }
 
     const matchedStudentIds = students.map((student) => student._id);
+
+    // Keep the batch on a single subscription plan (mirrors plan-aware generation).
+    const groupPlan = String(group.plan || "").trim();
+    if (groupPlan) {
+      const planByStudent = await planByStudentMap(students);
+      const mismatched = students.filter((student) => (planByStudent.get(String(student._id)) || "").toLowerCase() !== groupPlan.toLowerCase());
+      if (mismatched.length) {
+        return res.status(400).json({ message: `This group is for the ${groupPlan} plan. ${mismatched.length} selected student(s) are on a different plan.` });
+      }
+    }
+
     const alreadyGrouped = await ClassGroup.findOne({
       _id: { $ne: group._id },
       curriculum: group.curriculum,

@@ -7,6 +7,11 @@ const classGroupSchema = new mongoose.Schema({
   curriculum: { type: String, required: true, trim: true },
   grade: { type: String, required: true, trim: true },
   subject: { type: String, required: true, trim: true },
+  // Subscription plan (pricing package) this batch was grouped for, e.g.
+  // "Starter Plan". Empty means "any plan" — used by groups created before
+  // plan-aware grouping so they keep working. When set, only students on this
+  // plan may be added to the group.
+  plan: { type: String, trim: true, default: "" },
   // Capacity is deliberately restricted to 1 / 5 / 10: these mirror the
   // pricing packages and the auto-grouping algorithm (classGroupService).
   capacity: { type: Number, enum: [1, 5, 10], required: true },

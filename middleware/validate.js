@@ -107,6 +107,9 @@ export const schemas = {
     }),
     studentIds: z.array(z.string()).min(1, "At least one student is required"),
     codePrefix: z.string().min(1, "Code prefix is required").max(10),
+    // Optional subscription-plan filter: when set, every selected student must be
+    // on this exact plan so a batch groups only Starter/Standard/Premium students.
+    plan: z.string().max(80).optional().default(""),
   }),
 
   // Assign teacher to class group

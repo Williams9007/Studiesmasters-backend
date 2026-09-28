@@ -34,7 +34,7 @@ export async function listClassGroups(filter = {}) {
 }
 
 export async function createClassGroup(data = {}) {
-  const { code, curriculum, grade, subject, capacity, teacher, schedule, meetingLink } = data;
+  const { code, curriculum, grade, subject, capacity, teacher, schedule, meetingLink, plan } = data;
   if (!code || !curriculum || !grade || !subject) {
     throw new Error("code, curriculum, grade and subject are required");
   }
@@ -60,6 +60,7 @@ export async function createClassGroup(data = {}) {
 
     grade,
     subject,
+    plan: String(plan || "").trim(),
     capacity: Number(capacity),
     teacher: teacher || null,
     schedule: {
@@ -80,7 +81,7 @@ export async function updateClassGroup(id, updates = {}) {
   const group = await ClassGroup.findById(id);
   if (!group) throw new Error("Class group not found");
 
-  const allowed = ["curriculum", "grade", "subject", "status", "schedule", "meetingLink"];
+  const allowed = ["curriculum", "grade", "subject", "plan", "status", "schedule", "meetingLink"];
   if (updates.curriculum !== undefined) {
     const cv = String(updates.curriculum).trim();
     const norm = /^cambridge$/i.test(cv) ? "Cambridge" : /^ges$/i.test(cv) ? "GES" : null;
