@@ -27,9 +27,15 @@ import { callWs } from "./client.js";
 import { getCourseIdsFor } from "./courseMapper.js";
 import { moodleUsernameFor } from "./store.js";
 import { syncProfile } from "./syncProfile.js";
-import { syncClassSession, CLASS_SYNC_ACTIONS } from "./syncClass.js";
+import { syncClassSession, CLASS_SYNC_ACTIONS, ensureClassGroupMoodleGroup } from "./syncClass.js";
 import { audit } from "./audit.js";
 import logger from "../../utils/logger.js";
+// Backend-authoritative visibility. The student's ASSIGNED class group(s) are
+// resolved from MongoDB and every gate (membership, active enrolment,
+// curriculum, grade) is applied BEFORE any session is read — so a Moodle push
+// can never contain another class group's class, even one with the same
+// grade/curriculum/subject. Moodle performs no filtering of its own.
+import { loadStudentTimetable, getAssignedClassGroupIds } from "../../services/studentTimetableAccess.js";
 
 const EVENT_NAME_PREFIX = "[SM]";
 
@@ -89,6 +95,11 @@ function eventBody(session) {
     meetingLink
       ? `<p><a href="${meetingLink}">Join Virtual Class</a></p>`
       : `<p>The meeting link will appear here once the tutor starts the class.</p>`,
+    // Originating class group, so Moodle can assert the event belongs to one of
+    // the authenticated student's assigned groups before rendering it. The
+    // backend has already filtered by it — this is defence in depth, not the
+    // filter itself.
+    `<p data-sm-class-group-id="${String(session.classGroup?._id || session.classGroup || "")}">Class group: ${String(session.classGroup?._id || session.classGroup || "")}</p>`,
   ].join("");
   return {
     name: `${EVENT_NAME_PREFIX} ${groupId} ${session.classGroup?.subject || session.subject || "Class"}`.slice(0, 180),
@@ -167,24 +178,33 @@ async function resolveCourseIdForSession(session) {
  * Build the create_calendar_events params for ONE session.
  *
  * Moodle 4.5.13 accepts EXACTLY these event keys (verified live):
- *   name, description, format, eventtype, courseid, timestart, timeduration
- * and REJECTS unknown keys like `userid`, `repeats`, `visible`, `groupid`,
- * `sequence` with "Invalid parameter value detected: Unexpected keys".
- * A COURSE event is visible on every enrolled member's calendar; without a
- * course mapping we fall back to a SITE event so nothing is ever lost.
+ *   name, description, format, eventtype, courseid, groupid, timestart, timeduration
+ * and REJECTS unknown keys like `userid`, `repeats`, `visible`, `sequence` with
+ * "Invalid parameter value detected: Unexpected keys".
+ *
+ * A COURSE event is visible to every enrolled member, so — exactly like the
+ * class sync — the event MUST be scoped to the originating class group's Moodle
+ * group (groupid). Two class groups that share a Moodle course therefore never
+ * see each other's classes or Meet links. When the class cannot be scoped the
+ * caller publishes nothing (fail closed) instead of a course-wide event.
  */
 async function createEventParams(session, body) {
   const courseId = await resolveCourseIdForSession(session);
+  if (!courseId) return { params: null, courseId: null, reason: "no-course-mapping" };
+  const classGroupId = session?.classGroup?._id || session?.classGroup || null;
+  const scope = await ensureClassGroupMoodleGroup({ classGroupId, courseId });
+  if (!scope?.groupId) return { params: null, courseId, reason: "no-group-scope" };
   const params = {
     "events[0][name]": body.name,
     "events[0][description]": body.description,
     "events[0][format]": body.format,
-    "events[0][eventtype]": courseId ? "course" : "site",
+    "events[0][eventtype]": "course",
+    "events[0][courseid]": courseId,
+    "events[0][groupid]": scope.groupId,
     "events[0][timestart]": body.timestart,
     "events[0][timeduration]": body.timeduration,
   };
-  if (courseId) params["events[0][courseid]"] = courseId;
-  return { params, courseId };
+  return { params, courseId, groupId: scope.groupId };
 }
 
 /**
@@ -229,19 +249,18 @@ export async function syncTimetableForStudent({ studentId, from = null, to = nul
     const student = await Student.findById(studentId).lean();
     if (!student) return { synced: false, reason: "student-not-found" };
 
-    const groups = await ClassGroup.find({ students: student._id }).select("_id").lean();
-    if (!groups.length) return { synced: false, reason: "no-class-groups" };
-
     const range = { from: from ? new Date(from) : defaultRange().from, to: to ? new Date(to) : defaultRange().to };
-    const sessions = await ClassSession.find({
-      classGroup: { $in: groups.map((g) => g._id) },
-      date: { $gte: range.from, $lt: range.to },
-      status: { $in: ["scheduled", "live"] },
-    })
-      .populate("classGroup", "code subject grade curriculum")
-      .populate("teacher", "fullName name")
-      .sort({ date: 1, startTime: 1 })
-      .lean();
+    // The permission model lives in one place: the same helper the
+    // /api/students/:id/timetable route uses. It returns [] when the student has
+    // no active class group, which is a legitimate empty timetable — never a
+    // reason to widen the query.
+    const { sessions, assignedGroupIds } = await loadStudentTimetable(student._id, {
+      from: range.from,
+      to: range.to,
+      statuses: ["scheduled", "live"],
+    });
+    if (!assignedGroupIds.length) return { synced: false, reason: "no-class-groups" };
+    const groups = (await ClassGroup.find({ _id: { $in: assignedGroupIds } }).select("_id").lean());
 
     if (!sessions.length) return { synced: false, reason: "no-sessions-in-range", total: 0 };
 
@@ -289,12 +308,18 @@ export async function syncTimetableForStudent({ studentId, from = null, to = nul
         if (existingId) {
           await callWs("core_calendar_delete_calendar_events", { "events[0][eventid]": existingId, "events[0][repeat]": 0 });
         }
-        const { params: createParams, courseId } = await createEventParams(session, body);
+        const { params: createParams, courseId, groupId, reason } = await createEventParams(session, body);
+        // Fail closed: never fall back to a course-wide or site-wide event.
+        if (!createParams) {
+          failed += 1;
+          events.push({ sessionId: sid, error: reason || "not-scopeable" });
+          continue;
+        }
         const res = await callWs("core_calendar_create_calendar_events", createParams);
         const createdEv = Array.isArray(res?.events) ? res.events[0] : res?.event || null;
         const moodleEventId = Number(createdEv?.id || createdEv?.eventid || 0) || null;
         created += 1;
-        events.push({ sessionId: sid, moodleEventId, moodleCourseId: courseId, action: existingId ? "recreated" : "created" });
+        events.push({ sessionId: sid, moodleEventId, moodleCourseId: courseId, moodleGroupId: groupId, action: existingId ? "recreated" : "created" });
       } catch (err) {
         failed += 1;
         events.push({ sessionId: sid, error: String(err?.message || err).slice(0, 200) });
@@ -419,12 +444,18 @@ export async function syncTimetableForTeacher({ teacherId, from = null, to = nul
         if (existingId) {
           await callWs("core_calendar_delete_calendar_events", { "events[0][eventid]": existingId, "events[0][repeat]": 0 });
         }
-        const { params: createParams, courseId } = await createEventParams(session, body);
+        const { params: createParams, courseId, groupId, reason } = await createEventParams(session, body);
+        // Fail closed: never fall back to a course-wide or site-wide event.
+        if (!createParams) {
+          failed += 1;
+          events.push({ sessionId: sid, error: reason || "not-scopeable" });
+          continue;
+        }
         const res = await callWs("core_calendar_create_calendar_events", createParams);
         const createdEv = Array.isArray(res?.events) ? res.events[0] : res?.event || null;
         const moodleEventId = Number(createdEv?.id || createdEv?.eventid || 0) || null;
         created += 1;
-        events.push({ sessionId: sid, moodleEventId, moodleCourseId: courseId, action: existingId ? "recreated" : "created" });
+        events.push({ sessionId: sid, moodleEventId, moodleCourseId: courseId, moodleGroupId: groupId, action: existingId ? "recreated" : "created" });
       } catch (err) {
         failed += 1;
         events.push({ sessionId: sid, error: String(err?.message || err).slice(0, 200) });

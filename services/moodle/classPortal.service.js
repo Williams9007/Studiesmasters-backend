@@ -30,6 +30,12 @@ import Student from "../../models/Student.js";
 import Teacher from "../../models/teacher.js";
 import { recordAttendance, regenerateMeeting, endSession } from "../qao/scheduling.service.js";
 import { emitToAdmin, emitToQaos, emitToTeacher, emitToStudents } from "../qao/notify.js";
+// Single authority for student timetable visibility. Every STUDENT-facing read
+// below (sessions list, dashboard/upcoming/today, notifications, attendance,
+// recordings and the Google Meet link) goes through it, so a student can never
+// see, discover or join another class group's schedule — even when the other
+// group shares their grade, curriculum and subject. Moodle is presentation only.
+import { loadStudentTimetable, getAssignedClassGroupIds, assertSessionBelongsToStudent } from "../studentTimetableAccess.js";
 
 
 /**
@@ -78,6 +84,33 @@ async function healLinkForUsername(username, email = "") {
 }
 
 const detectKind = (u) => String(u || "").startsWith("sm_t") ? "teacher" : "student";
+
+/**
+ * Shape a session already resolved through the student access scope. Every
+ * payload carries `classGroupId` so Moodle can validate the event belongs to one
+ * of the authenticated student's assigned groups before rendering.
+ * The Google Meet link is released only while the class is LIVE (waiting room).
+ */
+function decorateStudentSession(s) {
+  const group = s.classGroup && typeof s.classGroup === "object" ? s.classGroup : {};
+  return {
+    sessionId: s._id,
+    classGroupId: String(group._id || s.classGroup || ""),
+    subject: group.subject || "",
+    grade: group.grade || "",
+    curriculum: group.curriculum || "",
+    code: group.code || "",
+    teacher: s.substituteTeacher?.fullName || s.teacher?.fullName || "",
+    date: s.date,
+    startTime: s.startTime,
+    endTime: s.endTime,
+    status: s.status,
+    meetingStatus: s.meetingStatus,
+    meetingLink: s.status === "live" ? (s.meetingLink || s.googleMeet?.meetingLink || "") : "",
+    canJoin: s.status === "live",
+    canStart: false,
+  };
+}
 
 /**
  * Verify a signed class request. Returns { ok, principalId, role, link } or a
@@ -167,38 +200,33 @@ export async function buildSignedRequest({ role, id, email }) {
 }
 /**
  * List sessions visible to a user (students = enrolled groups, teachers =
- * assigned or substitute). Returns display-safe fields; signed caller is
- * already trusted, and meeting links are only returned via join().
+ * assigned or substitute). `meetingLink` is included for TEACHERS always (they
+ * manage the meeting) and for STUDENTS only once the class is live — join()
+ * remains the waiting-room gate for everyone else.
  */
 export async function listUserSessions({ role, principalId }) {
-  let sessions;
-  if (role === "teacher") {
-    sessions = await ClassSession.find({
-      $or: [{ teacher: principalId }, { substituteTeacher: principalId }],
-      status: { $in: ["scheduled", "live"] },
-    })
-      .populate("classGroup", "code subject grade curriculum")
-      .populate("teacher", "fullName")
-      .populate("substituteTeacher", "fullName")
-      .sort({ date: 1, startTime: 1 })
-      .lean();
-  } else {
-    const groups = await ClassGroup.find({ students: principalId }).select("_id").lean();
-    sessions = await ClassSession.find({
-      classGroup: { $in: groups.map((g) => g._id) },
-      status: { $in: ["scheduled", "live"] },
-    })
-      .populate("classGroup", "code subject grade curriculum")
-      .populate("teacher", "fullName")
-      .populate("substituteTeacher", "fullName")
-      .sort({ date: 1, startTime: 1 })
-      .lean();
+  if (role === "student") {
+    const { sessions } = await loadStudentTimetable(principalId, { statuses: ["scheduled", "live"] });
+    const today = new Date().toISOString().slice(0, 10);
+    return sessions
+      .filter((s) => new Date(s.date).toISOString().slice(0, 10) >= today)
+      .map((s) => decorateStudentSession(s));
   }
+  const sessions = await ClassSession.find({
+    $or: [{ teacher: principalId }, { substituteTeacher: principalId }],
+    status: { $in: ["scheduled", "live"] },
+  })
+    .populate("classGroup", "code subject grade curriculum")
+    .populate("teacher", "fullName")
+    .populate("substituteTeacher", "fullName")
+    .sort({ date: 1, startTime: 1 })
+    .lean();
   const today = new Date().toISOString().slice(0, 10);
   return (sessions || [])
     .filter((s) => new Date(s.date).toISOString().slice(0, 10) >= today)
     .map((s) => ({
       sessionId: s._id,
+      classGroupId: String(s.classGroup?._id || ""),
       subject: s.classGroup?.subject || "",
       grade: s.classGroup?.grade || "",
       curriculum: s.classGroup?.curriculum || "",
@@ -208,14 +236,9 @@ export async function listUserSessions({ role, principalId }) {
       endTime: s.endTime,
       status: s.status,
       meetingStatus: s.meetingStatus,
-      // Teachers always see their link (they manage the meeting); students only
-      // once the class is live — the waiting room must keep gating early access.
-      meetingLink: role === "teacher" || s.status === "live"
-        ? (s.meetingLink || s.googleMeet?.meetingLink || "")
-        : "",
-      // Students see join only when live; teachers manage the meeting.
-      canJoin: role === "student" ? s.status === "live" : true,
-      canStart: role === "teacher" && (s.status === "scheduled" || s.status === "live"),
+      meetingLink: role === "teacher" || s.status === "live" ? (s.meetingLink || s.googleMeet?.meetingLink || "") : "",
+      canJoin: true,
+      canStart: s.status === "scheduled" || s.status === "live",
     }));
 }
 
@@ -255,6 +278,12 @@ export async function joinSession({ role, principalId, sessionId, waiting = true
     };
   }
   const group = session.classGroup;
+  // Re-apply the full permission model (assigned groups + active enrolment +
+  // curriculum + grade) instead of trusting a raw `students` membership test,
+  // so the Meet link is never released for a class outside the student's
+  // assigned, active class group(s).
+  const permitted = await assertSessionBelongsToStudent({ studentId: principalId, sessionId });
+  if (!permitted) return { error: { status: 403, message: "You are not enrolled in this class" } };
   const enrolled = group && Array.isArray(group.students) && group.students.some((id) => String(id) === String(principalId));
   if (!enrolled) return { error: { status: 403, message: "You are not enrolled in this class" } };
   if (session.status === "completed" || session.status === "cancelled") {
@@ -277,6 +306,12 @@ export async function joinSession({ role, principalId, sessionId, waiting = true
 export async function leaveSession({ role, principalId, sessionId, joinedAt = null }) {
   const session = await ClassSession.findById(sessionId).populate("classGroup", "students").lean();
   if (!session) return { error: { status: 404, message: "Session not found" } };
+  if (role === "student") {
+    // Same permission model as join(): attendance for another class group's
+    // session is never writable.
+    const permitted = await assertSessionBelongsToStudent({ studentId: principalId, sessionId });
+    if (!permitted) return { error: { status: 403, message: "You are not enrolled in this class" } };
+  }
   const group = session.classGroup;
   const enrolled = group && Array.isArray(group.students) && group.students.some((id) => String(id) === String(principalId));
   if (!enrolled) return { error: { status: 403, message: "You are not enrolled in this class" } };
@@ -333,6 +368,42 @@ const todayStart = () => {
 };
 
 /**
+ * Build the STUDENT dashboard payload from sessions that already passed the
+ * enforced access scope. The Meet link is only released while the class is live
+ * (waiting room); every item carries its `classGroupId`.
+ */
+function buildStudentDashboard({ groups, sessions, assignedGroupIds, today }) {
+  const liveNow = [];
+  const upcoming = [];
+  const history = [];
+  for (const s of sessions || []) {
+    const dateStr = new Date(s.date).toISOString().slice(0, 10);
+    const item = decorateStudentSession(s);
+    item.notes = s.notes || "";
+    item.recordingAvailable = Boolean(s.recordingLink);
+    if (s.status === "live") liveNow.push(item);
+    else if (s.status === "scheduled" && dateStr >= today) upcoming.push(item);
+    else history.push(item);
+  }
+  const courses = (groups || []).map((g) => ({
+    groupId: String(g._id),
+    classGroupId: String(g._id),
+    code: g.code || "",
+    subject: g.subject || "",
+    grade: g.grade || "",
+    curriculum: g.curriculum || "",
+  })).filter((c) => c.subject || c.code);
+  return {
+    role: "student",
+    assignedClassGroupIds: (assignedGroupIds || []).map(String),
+    courses,
+    liveNow,
+    upcoming,
+    history,
+  };
+}
+
+/**
  * Build the unified dashboard for the current role.
  * Returns { role, liveNow[], upcoming[], past[], waitingSessionId|null }.
  * Display-safe fields. `meetingLink` is included for TEACHERS always (they
@@ -359,13 +430,12 @@ export async function dashboardForUser({ role, principalId }) {
       .sort({ date: 1, startTime: 1 })
       .lean();
   } else {
-    groups = await ClassGroup.find({ students: principalId }).select("_id code subject grade curriculum").lean();
-    sessions = await ClassSession.find({ classGroup: { $in: groups.map((g) => g._id) } })
-      .populate("classGroup", "code subject grade curriculum")
-      .populate("teacher", "fullName")
-      .populate("substituteTeacher", "fullName")
-      .sort({ date: 1, startTime: 1 })
-      .lean();
+    // Student dashboard widgets (Live now / Upcoming / Today) are fed by the
+    // same enforced scope as the calendar — no client-side filtering, and never
+    // another class group's class.
+    const { groups: studentGroups, sessions: studentSessions, assignedGroupIds } =
+      await loadStudentTimetable(principalId);
+    return buildStudentDashboard({ groups: studentGroups, sessions: studentSessions, assignedGroupIds, today });
   }
 
   const liveNow = [];
@@ -375,6 +445,7 @@ export async function dashboardForUser({ role, principalId }) {
     const dateStr = new Date(s.date).toISOString().slice(0, 10);
     const item = {
       sessionId: s._id,
+      classGroupId: String(s.classGroup?._id || ""),
       subject: s.classGroup?.subject || "",
       grade: s.classGroup?.grade || "",
       curriculum: s.classGroup?.curriculum || "",
@@ -385,9 +456,7 @@ export async function dashboardForUser({ role, principalId }) {
       endTime: s.endTime,
       status: s.status,
       meetingStatus: s.meetingStatus,
-      meetingLink: role === "teacher" || s.status === "live"
-        ? (s.meetingLink || s.googleMeet?.meetingLink || "")
-        : "",
+      meetingLink: role === "teacher" || s.status === "live" ? (s.meetingLink || s.googleMeet?.meetingLink || "") : "",
       notes: s.notes || "",
       recordingAvailable: Boolean(s.recordingLink),
     };
@@ -436,24 +505,19 @@ export async function attendanceHistoryForUser({ role, principalId }) {
       })),
     };
   }
-  // student
-  const groups = await ClassGroup.find({ students: principalId }).select("_id").lean();
-  sessions = await ClassSession.find({
-    classGroup: { $in: groups.map((g) => g._id) },
-    status: { $in: ["completed", "live", "cancelled"] },
-  })
-    .populate("classGroup", "code subject grade curriculum")
-    .populate("teacher", "fullName")
-    .populate("substituteTeacher", "fullName")
-    .sort({ date: -1 })
-    .limit(60)
-    .lean();
+  // student — same enforced scope, so attendance history can only ever contain
+  // the student's own assigned, active class groups.
+  const { sessions: scoped } = await loadStudentTimetable(principalId, {
+    statuses: ["completed", "live", "cancelled"],
+    limit: 60,
+  });
   return {
     role,
-    rows: (sessions || []).map((s) => {
+    rows: (scoped || []).map((s) => {
       const rec = (s.attendance || []).find((a) => String(a.student || "") === String(principalId)) || {};
       return {
         sessionId: s._id,
+        classGroupId: String(s.classGroup?._id || ""),
         subject: s.classGroup?.subject || "",
         grade: s.classGroup?.grade || "",
         date: s.date,
@@ -474,26 +538,38 @@ export async function recordingHistoryForUser({ role, principalId }) {
   let query;
   if (role === "teacher") {
     query = { $or: [{ teacher: principalId }, { substituteTeacher: principalId }], recordingLink: { $ne: "" } };
+    const sessions = await ClassSession.find(query)
+      .populate("classGroup", "code subject grade curriculum")
+      .populate("teacher", "fullName")
+      .populate("substituteTeacher", "fullName")
+      .sort({ date: -1 })
+      .limit(50)
+      .lean();
+    return (sessions || []).map((s) => ({
+      sessionId: s._id,
+      classGroupId: String(s.classGroup?._id || ""),
+      subject: s.classGroup?.subject || "",
+      grade: s.classGroup?.grade || "",
+      teacher: s.substituteTeacher?.fullName || s.teacher?.fullName || "",
+      date: s.date,
+      duration: s.durationMinutes,
+      recordingLink: s.recordingLink,
+    }));
   } else {
-    const groups = await ClassGroup.find({ students: principalId }).select("_id").lean();
-    query = { classGroup: { $in: groups.map((g) => g._id) }, recordingLink: { $ne: "" } };
+    const { sessions: scoped } = await loadStudentTimetable(principalId, { limit: 50 });
+    return (scoped || [])
+      .filter((s) => s.recordingLink)
+      .map((s) => ({
+        sessionId: s._id,
+        classGroupId: String(s.classGroup?._id || ""),
+        subject: s.classGroup?.subject || "",
+        grade: s.classGroup?.grade || "",
+        teacher: s.substituteTeacher?.fullName || s.teacher?.fullName || "",
+        date: s.date,
+        duration: s.durationMinutes,
+        recordingLink: s.recordingLink,
+      }));
   }
-  const sessions = await ClassSession.find(query)
-    .populate("classGroup", "code subject grade curriculum")
-    .populate("teacher", "fullName")
-    .populate("substituteTeacher", "fullName")
-    .sort({ date: -1 })
-    .limit(50)
-    .lean();
-  return (sessions || []).map((s) => ({
-    sessionId: s._id,
-    subject: s.classGroup?.subject || "",
-    grade: s.classGroup?.grade || "",
-    teacher: s.substituteTeacher?.fullName || s.teacher?.fullName || "",
-    date: s.date,
-    duration: s.durationMinutes,
-    recordingLink: s.recordingLink,
-  }));
 }
 
 /** Teacher regenerates the Meeting link; Moodle is re-synced + students alerted. */
@@ -518,7 +594,14 @@ export async function regenerateSession({ role, principalId, sessionId }) {
   }
 }
 
-/** Recent notifications for a user (from the Notification collection). */
+/** Recent notifications for a user (from the Notification collection).
+ *
+ * For STUDENTS this is a privacy gate, not a convenience: a notification may
+ * reference a class (title/body/link). Any notification whose `classGroupId`
+ * is present but is NOT one of the student's assigned, active class groups is
+ * dropped, so a student is never told about — or linked to — another class
+ * group's schedule or Google Meet session. Notifications without a class group
+ * (school-wide announcements) are unaffected. */
 export async function notificationsForUser({ role, principalId, limit = 20 }) {
   try {
     const Notification = (await import("../../models/Notification.js")).default;
@@ -526,15 +609,27 @@ export async function notificationsForUser({ role, principalId, limit = 20 }) {
       .sort({ createdAt: -1 })
       .limit(Math.min(Number(limit) || 20, 50))
       .lean();
-    return (rows || []).map((n) => ({
-      id: n._id,
-      title: n.title || "",
-      message: n.message,
-      type: n.type || "info",
-      read: !!n.read,
-      link: n.link || null,
-      createdAt: n.createdAt,
-    }));
+    let allowed = null;
+    if (role === "student") {
+      allowed = new Set((await getAssignedClassGroupIds(principalId)).map(String));
+    }
+    return (rows || [])
+      .filter((n) => {
+        if (role !== "student") return true;
+        const ref = n.classGroupId || n.classGroup || null;
+        if (ref === null || ref === undefined || ref === "") return true;
+        return allowed.has(String(ref));
+      })
+      .map((n) => ({
+        id: n._id,
+        title: n.title || "",
+        message: n.message,
+        type: n.type || "info",
+        read: !!n.read,
+        link: n.link || null,
+        classGroupId: n.classGroupId || n.classGroup || null,
+        createdAt: n.createdAt,
+      }));
   } catch { return []; }
 }
 const classPortal = {

@@ -280,11 +280,16 @@ export async function createSession(data = {}) {
     }).catch(() => {});
 
     // All enrolled students get a persistent notification + socket event.
+    // The originating class group is stamped on it so the student-facing
+    // surfaces can re-assert the assignment gate (a student must never be
+    // shown — or linked to — another class group's class).
     await notifyStudents({
       studentIds,
       title: "New Class Added to Your Timetable",
       message: `${group.subject || "Class"}${group.grade ? ` (${group.grade})` : ""} on ${new Date(session.date).toLocaleDateString()} at ${session.startTime}–${session.endTime}`,
       type: "info",
+      classGroupId: group._id || session.classGroup || null,
+      sessionId: session._id,
     }).catch(() => {});
   }
 

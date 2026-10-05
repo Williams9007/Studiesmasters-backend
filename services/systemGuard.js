@@ -19,7 +19,7 @@ const __dirname = path.dirname(__filename);
 const CONFIG = {
   // Firewall
   firewall: {
-    enabled: true,
+    enabled: process.env.SYSTEM_GUARD_FIREWALL !== "false",
     maxRequestsPerMinute: 600,
     maxRequestsPerSecond: 30,
     suspiciousPatterns: [
@@ -46,7 +46,7 @@ const CONFIG = {
 
   // Diagnosis
   diagnosis: {
-    enabled: true,
+    enabled: process.env.SYSTEM_GUARD_DIAGNOSIS !== "false",
     checkIntervalMs: 30000, // Check every 30 seconds
     memoryThresholdMB: 500, // Alert if RSS exceeds this
     cpuThresholdPercent: 80, // Alert if CPU > 80%
@@ -58,7 +58,7 @@ const CONFIG = {
 
   // Self-Healing
   healing: {
-    enabled: true,
+    enabled: process.env.SYSTEM_GUARD_HEALING !== "false",
     maxRetries: 3,
     cooldownMs: 60000, // Wait 1 min between healing attempts
     autoRestartOnCritical: true,

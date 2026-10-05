@@ -252,7 +252,9 @@ export async function publishTimetable({ group, occurrences = [] }) {
     // ── Durable + realtime: students ──────────────────────────────────────
     if (studentIds.length) {
       try {
-        await notifyStudents({ studentIds, title, message, type: "info" });
+        // Stamped with the originating class group so a student can only ever
+        // be shown notifications for their OWN assigned, active class group(s).
+        await notifyStudents({ studentIds, title, message, type: "info", classGroupId: full?._id || group?._id || null });
         summary.notifiedStudents = studentIds.length;
       } catch (err) {
         summary.errors.push(`students-notify: ${err.message}`);

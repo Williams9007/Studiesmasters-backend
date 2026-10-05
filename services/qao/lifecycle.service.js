@@ -80,10 +80,32 @@ export function stageFor(session, now = new Date()) {
 
 const reminded = new Set(); // `${sessionId}:${stage}` de-dupe for reminders
 
+/**
+ * The students who may legitimately be told about a session in this class group.
+ *
+ * This is the single choke point for every lifecycle notification (reminder,
+ * live, completed) and the socket emit, so a student is never told about — or
+ * sent the Google Meet link for — a class group they are not assigned to. The
+ * SAME access service the timetable API uses decides membership + active
+ * enrolment + curriculum + grade, so the two can never disagree.
+ */
 async function groupStudentIds(classGroupId) {
+  const { getAssignedClassGroupIds } = await import("../studentTimetableAccess.js");
+  const raw = classGroupId?._id || classGroupId;
+  if (!raw) return [];
+  // Which students could be in this group at all (membership, Mongo-side).
   const Group = (await import("../../models/ClassGroup.js")).default;
-  const g = await Group.findById(classGroupId).select("students").lean();
-  return g?.students || [];
+  const g = await Group.findById(raw).select("students").lean();
+  const candidates = (g?.students || []).map(String);
+  if (!candidates.length) return [];
+
+  // Keep only those whose assigned-and-active set actually contains this group.
+  const allowed = [];
+  for (const id of candidates) {
+    const assigned = await getAssignedClassGroupIds(id).catch(() => []);
+    if (assigned.map(String).includes(String(raw))) allowed.push(id);
+  }
+  return allowed;
 }
 async function remind({ session, kind, minutesLabel }) {
   const key = `${session._id}:${kind}`;
@@ -123,6 +145,8 @@ async function remind({ session, kind, minutesLabel }) {
         title: "Class reminder",
         message: `Your ${payload.subject}${payload.grade ? ` (${payload.grade})` : ""} class starts in ${minutesLabel}.`,
         type: "info",
+        classGroupId: session.classGroup?._id || session.classGroup || null,
+        sessionId: session._id,
       });
       emitToStudents(studentIds, "class:starting", payload);
 
@@ -166,7 +190,7 @@ async function goLive(session) {
     await createNotification({ userId: teacherId, role: "teacher", title: "Class is live", message: `${group?.subject || "Class"} class is now live — join the session.`, type: "info" });
     const studentIds = await groupStudentIds(session.classGroup);
     if (studentIds.length) {
-      await notifyStudents({ studentIds, title: "Class is live", message: `Your ${group?.subject || "Class"} class is now live — log in to join.`, type: "info" });
+      await notifyStudents({ studentIds, title: "Class is live", message: `Your ${group?.subject || "Class"} class is now live — log in to join.`, type: "info", classGroupId: session.classGroup?._id || session.classGroup || null, sessionId: session._id });
     }
   } catch { /* non-fatal */ }
   await logQaoAction({ action: "CLASS_AUTO_LIVE", resource: "ClassSession", resourceId: session._id, details: { by: "lifecycle" } });
@@ -188,7 +212,7 @@ async function goCompleted(session) {
     await createNotification({ userId: teacherId, role: "teacher", title: "Class completed", message: `${group?.subject || "Class"} class has ended — recording and summary will be available shortly.`, type: "info" });
     const studentIds = await groupStudentIds(session.classGroup);
     if (studentIds.length) {
-      await notifyStudents({ studentIds, title: "Class completed", message: `Your ${group?.subject || "Class"} class has ended — check your dashboard for the recording and summary.`, type: "info" });
+      await notifyStudents({ studentIds, title: "Class completed", message: `Your ${group?.subject || "Class"} class has ended — check your dashboard for the recording and summary.`, type: "info", classGroupId: session.classGroup?._id || session.classGroup || null, sessionId: session._id });
     }
   } catch { /* non-fatal */ }
   await logQaoAction({ action: "CLASS_AUTO_COMPLETED", resource: "ClassSession", resourceId: session._id, details: { by: "lifecycle" } });

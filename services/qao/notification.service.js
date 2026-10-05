@@ -83,6 +83,8 @@ export async function notifyStudent({
   message,
   type = "info",
   link = null,
+  classGroupId = null,
+  sessionId = null,
   emitEvent = "notification:new",
 }) {
   const n = await Notification.create({
@@ -92,6 +94,8 @@ export async function notifyStudent({
     message: safeMessage(message),
     type: safeType(type),
     link: link || null,
+    classGroupId: classGroupId || null,
+    sessionId: sessionId || null,
   });
   if (emitEvent) {
     emitToStudent(studentId, emitEvent, {
@@ -100,6 +104,7 @@ export async function notifyStudent({
       message: n.message,
       type: n.type,
       link: n.link,
+      classGroupId: n.classGroupId,
     });
   }
   return n;
@@ -113,6 +118,8 @@ export async function notifyStudents({
   message,
   type = "info",
   link = null,
+  classGroupId = null,
+  sessionId = null,
   emitEvent = "notification:new",
 }) {
   if (!Array.isArray(studentIds) || !studentIds.length) return [];
@@ -124,6 +131,8 @@ export async function notifyStudents({
       message: safeMessage(message),
       type: safeType(type),
       link: link || null,
+      classGroupId: classGroupId || null,
+      sessionId: sessionId || null,
     }))
   );
   if (emitEvent) {
@@ -190,15 +199,42 @@ export async function notifyAllQaos({ title = "", message, type = "alert", emitE
 
 // ── Query helpers (generic, for teacher/student/admin) ──────────────────────
 
-/** List notifications for a specific user (any role). */
+/** List notifications for a specific user (any role).
+ *
+ * For STUDENTS this applies the class-group permission gate: a notification
+ * stamped with a `classGroupId` is only returned when that class group is one of
+ * the student's ASSIGNED, active class groups. A student therefore never sees a
+ * notification about (or a link to) another class group's class, even if it was
+ * written for them. Notifications with no class group (school-wide
+ * announcements) are unaffected. */
 export async function listForUser({ userId, role, limit = 50 } = {}) {
   const query = {};
   if (userId) query.userId = userId;
   if (role) query.role = role;
-  return Notification.find(query)
+  const rows = await Notification.find(query)
     .sort({ createdAt: -1 })
     .limit(Math.min(Number(limit) || 50, 200))
     .lean();
+  if (role !== "student" || !userId) return rows;
+
+  // Same rule as the timetable, same helper: only notifications belonging to one
+  // of this student's ASSIGNED, ACTIVE class groups survive (school-wide notices
+  // carry no class group and are always allowed).
+  const { getAssignedClassGroupIds, isNotificationVisibleToStudent } = await import("../studentTimetableAccess.js");
+  const assigned = await getAssignedClassGroupIds(userId).catch(() => []);
+  return (rows || []).filter((n) => isNotificationVisibleToStudent(n, assigned));
+}
+
+/**
+ * Unread count that uses EXACTLY the same class-group filter as listForUser, so
+ * the bell badge can never advertise a notification the list then hides.
+ */
+export async function unreadCountForUser({ userId, role } = {}) {
+  if (role !== "student" || !userId) return unreadCount({ userId, role });
+  const { getAssignedClassGroupIds, isNotificationVisibleToStudent } = await import("../studentTimetableAccess.js");
+  const assigned = await getAssignedClassGroupIds(userId).catch(() => []);
+  const rows = await Notification.find({ userId, role, read: false }).select("classGroupId classGroup").lean();
+  return (rows || []).filter((n) => isNotificationVisibleToStudent(n, assigned)).length;
 }
 
 /** Mark a notification as read (scoped to userId for safety). */

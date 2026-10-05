@@ -24,6 +24,9 @@ import {
   listForUser, markRead, markAllRead, unreadCount,
   deleteNotification, clearNotifications,
 } from "../services/qao/notification.service.js";
+// The ONLY authority for "which classes may this student see?". Used by the
+// /timetable route below so the backend — not Moodle — decides visibility.
+import { loadStudentTimetable } from "../services/studentTimetableAccess.js";
 
 dotenv.config();
 const router = express.Router();
@@ -35,6 +38,19 @@ const authLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+/**
+ * Ownership guard for every /:studentId/... route below.
+ * studentAuth resolves the caller; this asserts the caller IS the student in
+ * the path. Class-group isolation means nothing if any anonymous (or other
+ * student's) caller can open another student's timetable/notifications by id.
+ */
+const requireStudentSelf = (req, res, next) => {
+  if (String(req.user?._id || "") !== String(req.params.studentId || "")) {
+    return res.status(403).json({ success: false, message: "You can only access your own timetable and notifications" });
+  }
+  next();
+};
 
 const createUserId = () =>
   `SM-ST-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
@@ -105,7 +121,7 @@ router.post("/register", async (req, res) => {
     // Validate input
     const selectedSubjects = Array.isArray(subjects) ? subjects : typeof subjects === "string" && subjects.trim() !== "" ? [subjects] : [];
     const catalog = curriculumCatalog[curriculum];
-    
+
     console.log("[Registration] Starting registration for:", { email, curriculum, grade, pkg, subjectsCount: selectedSubjects.length });
 
     if (!fullName || !email || !phone || !curriculum || !pkg || !grade || selectedSubjects.length === 0) {
@@ -230,7 +246,7 @@ router.post("/register", async (req, res) => {
       code: err.code,
       stack: err.stack
     });
-    
+
     if (err?.code === 11000) {
       return res.status(400).json({ message: "An account with this email already exists." });
     }
@@ -240,7 +256,7 @@ router.post("/register", async (req, res) => {
     if (err?.name === "CastError") {
       return res.status(400).json({ message: `Invalid data format: ${err.message}` });
     }
-    
+
     res.status(500).json({
       message: "Server error during student signup",
       error: process.env.NODE_ENV === "development" ? err.message : undefined
@@ -381,25 +397,22 @@ router.get("/notifications/:studentId/unread-count", async (req, res) => {
 /* ==================== MY TIMETABLE (student) ==================== */
 /**
  * GET /api/students/:studentId/timetable
- * This week's classes (Mon–Sun) for every class group the student is enrolled
- * in — all statuses, so the dashboard calendar shows upcoming, live and
- * completed sessions. The Google Meet link is delivered to the student through
- * their Moodle calendar (see services/moodle/syncTimetable.js), not here.
+ *
+ * BACKEND-AUTHORITATIVE timetable. The Mongo filter is built by
+ * services/studentTimetableAccess.js, which resolves the student's ASSIGNED
+ * class group(s) from MongoDB and applies every permission gate (student id,
+ * class-group membership, active enrolment, curriculum, grade) BEFORE a
+ * single session is read. The response therefore already contains only classes
+ * this student may see — Moodle (and the React app) render it verbatim and must
+ * never add filtering of their own.
+ *
+ * A student with no active class group gets an EMPTY list, never a fallback
+ * to a broader query. Every event carries its originating `classGroupId` so a
+ * client can assert the event belongs to an assigned group before rendering.
  */
-router.get("/:studentId/timetable", async (req, res) => {
+router.get("/:studentId/timetable", studentAuth, requireStudentSelf, async (req, res) => {
   try {
     const { studentId } = req.params;
-    const groups = await ClassGroup.find({ students: studentId })
-      .select("_id code subject grade curriculum")
-      .lean();
-    const groupIds = groups.map((g) => g._id);
-    if (!groupIds.length) {
-      return res.json({
-        success: true,
-        timetable: [],
-        classGroups: [],
-      });
-    }
 
     const now = new Date();
     const monday = new Date(now);
@@ -408,30 +421,46 @@ router.get("/:studentId/timetable", async (req, res) => {
     const sunday = new Date(monday);
     sunday.setDate(sunday.getDate() + 7);
 
-    const sessions = await ClassSession.find({
-      classGroup: { $in: groupIds },
-      date: { $gte: monday, $lt: sunday },
-    })
-      .populate("classGroup", "code subject grade")
-      .populate("teacher", "fullName name")
-      .sort({ date: 1, startTime: 1 })
-      .lean();
+    const { groups, sessions, assignedGroupIds } = await loadStudentTimetable(studentId, {
+      from: monday,
+      to: sunday,
+    });
 
     res.json({
       success: true,
-      classGroups: groups,
-      timetable: sessions.map((s) => ({
-        id: s._id,
-        date: s.date,
-        startTime: s.startTime,
-        endTime: s.endTime,
-        status: s.status,
-        subject: s.classGroup?.subject || "Class",
-        grade: s.classGroup?.grade || "",
-        groupCode: s.classGroup?.code || "",
-        teacher: s.teacher?.fullName || s.teacher?.name || "Teacher TBA",
-        meetingStatus: s.meetingStatus,
+      // Explicitly advertised so clients can verify an event's group before
+      // rendering it (requirement: every event carries its classGroupId).
+      assignedClassGroupIds: assignedGroupIds.map(String),
+      classGroups: groups.map((g) => ({
+        _id: g._id,
+        classGroupId: String(g._id),
+        code: g.code,
+        subject: g.subject,
+        grade: g.grade,
+        curriculum: g.curriculum,
+        status: g.status,
       })),
+      timetable: sessions.map((s) => {
+        const group = s.classGroup && typeof s.classGroup === "object" ? s.classGroup : {};
+        const groupId = String(group._id || s.classGroup || "");
+        return {
+          id: s._id,
+          sessionId: String(s._id),
+          // Originating class group — the client MUST validate this against the
+          // student's assigned groups before rendering.
+          classGroupId: groupId,
+          date: s.date,
+          startTime: s.startTime,
+          endTime: s.endTime,
+          status: s.status,
+          subject: group.subject || "Class",
+          grade: group.grade || "",
+          curriculum: group.curriculum || "",
+          groupCode: group.code || "",
+          teacher: s.teacher?.fullName || s.teacher?.name || "Teacher TBA",
+          meetingStatus: s.meetingStatus,
+        };
+      }),
     });
   } catch (err) {
     console.error("Student timetable error:", err);
@@ -440,7 +469,7 @@ router.get("/:studentId/timetable", async (req, res) => {
 });
 
 /** GET /api/students/:studentId/notifications */
-router.get("/:studentId/notifications", async (req, res) => {
+router.get("/:studentId/notifications", studentAuth, requireStudentSelf, async (req, res) => {
   try {
     const { studentId } = req.params;
     const { role, limit } = req.query;
@@ -457,7 +486,7 @@ router.get("/:studentId/notifications", async (req, res) => {
 });
 
 /** GET /api/students/:studentId/notifications/unread-count */
-router.get("/:studentId/notifications/unread-count", async (req, res) => {
+router.get("/:studentId/notifications/unread-count", studentAuth, requireStudentSelf, async (req, res) => {
   try {
     const { studentId } = req.params;
     const count = await unreadCount({ userId: studentId, role: "student" });
@@ -469,7 +498,7 @@ router.get("/:studentId/notifications/unread-count", async (req, res) => {
 });
 
 /** PATCH /api/students/:studentId/notifications/:id/read */
-router.patch("/:studentId/notifications/:id/read", async (req, res) => {
+router.patch("/:studentId/notifications/:id/read", studentAuth, requireStudentSelf, async (req, res) => {
   try {
     const { studentId, id } = req.params;
     const n = await markRead({ notificationId: id, userId: studentId });
@@ -480,7 +509,7 @@ router.patch("/:studentId/notifications/:id/read", async (req, res) => {
 });
 
 /** PATCH /api/students/:studentId/notifications/read-all */
-router.patch("/:studentId/notifications/read-all", async (req, res) => {
+router.patch("/:studentId/notifications/read-all", studentAuth, requireStudentSelf, async (req, res) => {
   try {
     const { studentId } = req.params;
     await markAllRead({ userId: studentId, role: "student" });
@@ -492,7 +521,7 @@ router.patch("/:studentId/notifications/read-all", async (req, res) => {
 });
 
 /** DELETE /api/students/:studentId/notifications/:id - dismiss one notification */
-router.delete("/:studentId/notifications/:id", async (req, res) => {
+router.delete("/:studentId/notifications/:id", studentAuth, requireStudentSelf, async (req, res) => {
   try {
     const { studentId, id } = req.params;
     await deleteNotification({ notificationId: id, userId: studentId });
@@ -506,7 +535,7 @@ router.delete("/:studentId/notifications/:id", async (req, res) => {
  * DELETE /api/students/:studentId/notifications - clear old notifications.
  * Keeps unread ones by default; pass ?all=true to wipe everything.
  */
-router.delete("/:studentId/notifications", async (req, res) => {
+router.delete("/:studentId/notifications", studentAuth, requireStudentSelf, async (req, res) => {
   try {
     const { studentId } = req.params;
     const onlyRead = req.query.all !== "true";

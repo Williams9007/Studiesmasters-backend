@@ -15,7 +15,7 @@ import { runReconciliation } from "./reconciliation.js";
 import { provisionStructure, provisionStatus } from "./provisioning.js";
 import { syncAllStudents, syncAllTeachers, queueSnapshot } from "./bulkSync.js";
 import { enqueue } from "./queue.js";
-import { replayQueuedClassSync, syncClassSession, toMoodleDisplay } from "./syncClass.js";
+import { replayQueuedClassSync, syncClassSession, toMoodleDisplay, CLASS_SYNC_ACTIONS } from "./syncClass.js";
 import { health, bump } from "./metrics.js";
 import { processQueueBatch, startWorker } from "./worker.js";
 import { store } from "./store.js";
@@ -61,6 +61,7 @@ export const moodle = {
   syncClassSession,
   toMoodleDisplay,
   syncMainWebsiteName,
+  CLASS_SYNC_ACTIONS,
 };
 
 export {
@@ -71,7 +72,7 @@ export {
   resolveStudentAccess, resolveSubjects, recordSyncStatus, syncOverview,
   listWarnings, retryFailedSyncs,
   bump as bumpMetrics, processQueueBatch, startWorker, store, replayQueuedClassSync,
-  syncClassSession, toMoodleDisplay, syncMainWebsiteName,
+  syncClassSession, toMoodleDisplay, syncMainWebsiteName, CLASS_SYNC_ACTIONS,
 };
 
 export default moodle;

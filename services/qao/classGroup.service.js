@@ -1,7 +1,10 @@
 ﻿import ClassGroup from "../../models/ClassGroup.js";
+import ClassSession from "../../models/ClassSession.js";
 import Teacher from "../../models/teacher.js";
 import { sanitizeClassGroup } from "./sanitize.js";
-import { emitToQaos } from "./notify.js";
+import { emitToQaos, emitToTeacher, emitToStudents } from "./notify.js";
+import { notifyStudents } from "./notification.service.js";
+import { logQaoAction } from "./audit.service.js";
 
 // Capacity stays restricted to the package-aligned values used by the
 // auto-grouping algorithm (services/classGroupService.js).
@@ -117,6 +120,71 @@ if (updates.weeklySlots !== undefined) {
     .populate("teacher", "fullName email employeeRole employmentStatus photo")
     .lean();
   return sanitizeClassGroup(populated);
+}
+
+/**
+ * Delete a whole class (ClassGroup) plus every generated ClassSession under it.
+ * Moodle/Calendar display rows are best-effort: failures never block the delete.
+ */
+export async function deleteClassGroup(id) {
+  const group = await ClassGroup.findById(id).lean();
+  if (!group) throw new Error("Class group not found");
+
+  const sessions = await ClassSession.find({ classGroup: group._id })
+    .select("_id status date startTime moodleEventId")
+    .lean();
+  const sessionIds = sessions.map((s) => s._id);
+  const upcoming = sessions.filter((s) => ["scheduled", "live"].includes(s.status));
+
+  // Best-effort: cancel the Moodle display events for upcoming sessions so the
+  // class disappears from Moodle calendars too (never blocks the delete).
+  if (upcoming.length) {
+    try {
+      const { syncClassSession, CLASS_SYNC_ACTIONS } = await import("../moodle/syncClass.js");
+      const cancelAction = CLASS_SYNC_ACTIONS?.CANCELLED || "CLASS_CANCELLED";
+      await Promise.allSettled(
+        upcoming.slice(0, 50).map((s) =>
+          (async () => syncClassSession({ ...s, classGroup: group }, { action: cancelAction, sessionId: s._id }))()
+        )
+      );
+    } catch { /* display sync never breaks deleting */ }
+  }
+
+  if (sessionIds.length) {
+    await ClassSession.deleteMany({ _id: { $in: sessionIds } });
+  }
+  await ClassGroup.deleteOne({ _id: group._id });
+
+  // Notify the people who would have attended (durable for students).
+  try {
+    const studentIds = (group.students || []).map(String);
+    const teacherId = group.teacher ? String(group.teacher) : null;
+    const label = `${group.subject || "Class"}${group.grade ? ` (${group.grade})` : ""} - ${group.code || ""}`.trim();
+    if (studentIds.length) {
+      await notifyStudents({
+        studentIds,
+        title: "Class removed",
+        message: `Your ${label} class has been removed by the admin. ${upcoming.length} upcoming session(s) were cancelled.`,
+        type: "alert",
+      }).catch(() => {});
+      emitToStudents(studentIds, "class:cancelled", { classGroupId: String(group._id), code: group.code });
+    }
+    if (teacherId) {
+      emitToTeacher(teacherId, "class:cancelled", { classGroupId: String(group._id), code: group.code });
+    }
+    emitToQaos("class:cancelled", { classGroupId: String(group._id), code: group.code });
+  } catch { /* notifications never break deleting */ }
+
+  try {
+    await logQaoAction({
+      action: "CLASS_GROUP_DELETED",
+      resource: "ClassGroup",
+      resourceId: String(group._id),
+      details: { code: group.code, subject: group.subject, grade: group.grade, sessionsDeleted: sessionIds.length },
+    });
+  } catch { /* audit never breaks deleting */ }
+
+  return { ok: true, deleted: String(group._id), code: group.code, sessionsDeleted: sessionIds.length };
 }
 
 

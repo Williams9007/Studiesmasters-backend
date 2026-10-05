@@ -14,6 +14,12 @@ const notificationSchema = new mongoose.Schema({
   link: { type: String, trim: true, default: null },
   // Optional attachment path from the broadcast
   attachment: { type: String, default: null },
+  // Originating class group, when the notification is about a specific class.
+  // Used as a permission gate: a student only ever sees notifications whose
+  // classGroupId is one of their ASSIGNED, active class groups, so a class
+  // group's schedule / Meet link can never leak to another group.
+  classGroupId: { type: mongoose.Schema.Types.ObjectId, ref: "ClassGroup", default: null },
+  sessionId: { type: mongoose.Schema.Types.ObjectId, ref: "ClassSession", default: null },
   createdAt: { type: Date, default: Date.now },
 });
 

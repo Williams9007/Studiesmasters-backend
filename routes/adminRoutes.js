@@ -1648,7 +1648,24 @@ router.put("/subjects/:id/moodle-course", adminAuth, async (req, res) => {
 router.post("/timetable/sync-moodle", adminAuth, async (req, res) => {
   try {
     const { syncClassSession, CLASS_SYNC_ACTIONS } = await import("../services/moodle/index.js");
+    if (typeof syncClassSession !== "function" || !CLASS_SYNC_ACTIONS?.UPDATED) {
+      throw new Error("Moodle class-sync service is not available (syncClassSession export missing)");
+    }
+    const mongoose = (await import("mongoose")).default;
     const ClassSession = (await import("../models/ClassSession.js")).default;
+
+    // Guard: an invalid classGroupId (e.g. "sessions" from a stale client, or a
+    // malformed id) makes Mongoose throw a CastError -> HTTP 500. Return 400 instead.
+    if (req.body?.classGroupId && !mongoose.Types.ObjectId.isValid(String(req.body.classGroupId))) {
+      return res.status(400).json({ success: false, message: "Invalid classGroupId." });
+    }
+    // Guard: invalid date filters must not 500 either.
+    for (const key of ["from", "to"]) {
+      const v = req.body?.[key];
+      if (v !== undefined && v !== null && v !== "" && Number.isNaN(new Date(v).getTime())) {
+        return res.status(400).json({ success: false, message: `Invalid ${key} date.` });
+      }
+    }
 
     const query = { status: { $in: ["scheduled", "live"] } };
     if (req.body?.classGroupId) query.classGroup = req.body.classGroupId;
@@ -1664,12 +1681,15 @@ router.post("/timetable/sync-moodle", adminAuth, async (req, res) => {
       .sort({ date: 1, startTime: 1 })
       .lean();
 
+    // Per-session isolation: build the action lazily INSIDE the async callback so
+    // one bad row can never throw synchronously out of .map() and 500 the batch.
     const results = await Promise.allSettled(
       sessions.map((s) =>
-        syncClassSession(s, {
-          action: s.meetingStatus === "ready" ? CLASS_SYNC_ACTIONS.MEETING_READY : CLASS_SYNC_ACTIONS.UPDATED,
-          sessionId: s._id,
-        })
+        (async () => {
+          const action =
+            s?.meetingStatus === "ready" ? CLASS_SYNC_ACTIONS.MEETING_READY : CLASS_SYNC_ACTIONS.UPDATED;
+          return syncClassSession(s, { action, sessionId: s._id });
+        })()
       )
     );
 
@@ -1806,6 +1826,20 @@ router.post("/timetable/:id/generate", adminAuth, async (req, res) => {
   }
 });
 
+// Delete one generated session from the timetable (per-row delete button).
+// NOTE: must be registered BEFORE Express sees "/timetable/:id/..." patterns
+// conceptually — kept next to the other /timetable/* routes so
+// DELETE /admin/timetable/sessions/:id never collides with a class id.
+router.delete("/timetable/sessions/:id", adminAuth, async (req, res) => {
+  try {
+    const result = await schedulingSvc.deleteSession(req.params.id);
+    await logAudit({ admin: req.admin, action: "SESSION_DELETED", resource: "ClassSession", resourceId: String(req.params.id), details: result, req });
+    res.json({ success: true, message: "Scheduled class deleted.", ...result });
+  } catch (err) {
+    res.status(err.message?.toLowerCase().includes("not found") ? 404 : 400).json({ success: false, message: err.message });
+  }
+});
+
 // Manually create a class (with weekly slots + optional teacher) for the admin
 // Scheduler screen. Delegates to the shared QAO-safe classGroup service.
 router.post("/class-groups", adminAuth, async (req, res) => {
@@ -1814,6 +1848,18 @@ router.post("/class-groups", adminAuth, async (req, res) => {
     res.status(201).json({ success: true, classGroup: group });
   } catch (err) {
     res.status(err.message.includes("already exists") ? 409 : 400).json({ success: false, message: err.message });
+  }
+});
+
+// Delete a whole class from the timetable (ClassGroup + all its sessions).
+// Different HTTP method from GET/POST /class-groups*, so no route conflict.
+router.delete("/class-groups/:id", adminAuth, async (req, res) => {
+  try {
+    const result = await classGroupService.deleteClassGroup(req.params.id);
+    await logAudit({ admin: req.admin, action: "CLASS_GROUP_DELETED", resource: "ClassGroup", resourceId: String(req.params.id), details: result, req });
+    res.json({ success: true, message: `Class ${result.code || ""} deleted with ${result.sessionsDeleted || 0} session(s).`.trim(), ...result });
+  } catch (err) {
+    res.status(err.message === "Class group not found" ? 404 : 400).json({ success: false, message: err.message });
   }
 });
 

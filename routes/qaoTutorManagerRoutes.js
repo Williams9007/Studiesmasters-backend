@@ -302,6 +302,31 @@ router.post("/timetable/:id/generate", verifyQao, async (req, res) => {
   }
 });
 
+// Delete one generated session from the timetable (per-row delete button).
+router.delete("/timetable/sessions/:id", verifyQao, async (req, res) => {
+  try {
+    res.json({ success: true, ...(await scheduling.deleteSession(req.params.id)) });
+  } catch (err) {
+    res.status(err.message.toLowerCase().includes("not found") ? 404 : 400).json({ success: false, message: err.message });
+  }
+});
+
+// Delete a whole class from the timetable (ClassGroup + all its sessions).
+router.delete("/class-groups/:id", verifyQao, async (req, res) => {
+  try {
+    const result = await groups.deleteClassGroup(req.params.id);
+    await logQaoAction({
+      action: "CLASS_GROUP_DELETED",
+      resource: "ClassGroup",
+      resourceId: String(req.params.id),
+      details: { ...result, actor: String(req.qao?._id || req.qao?.id || "") },
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(err.message === "Class group not found" ? 404 : 400).json({ success: false, message: err.message });
+  }
+});
+
 // -------------------- Scheduling engine (ClassSession) --------------------
 // -------------------- Scheduling engine (ClassSession) --------------------
 router.get("/sessions", verifyQao, async (req, res) => {

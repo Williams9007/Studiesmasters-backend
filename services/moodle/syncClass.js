@@ -15,8 +15,12 @@
 //     function).
 //   - Events appear in Moodle's native Calendar + Upcoming-events block, with
 //     the Meet URL embedded in the event description ("Join Virtual Class").
-//   - Course-mapped classes become course events; unmapped ones become site
-//     events (visible to everyone) so nothing is ever lost.
+//   - ISOLATION: each class group gets its own Moodle group inside the mapped
+//     course and every event is created with that groupid, so a course shared by
+//     several class groups never shows one group's class (or Meet link) to
+//     another. When the class group cannot be scoped (no course mapping or no
+//     group), the class is NOT published at all — fail closed, never a
+//     site-wide or course-wide event — and a durable retry job is queued.
 //   - The created Moodle event id is stored in MoodleAuditLog.detail so later
 //     updates/deletes target the same event (idempotent, no duplicates).
 //   - Failures are durable: a `syncClass` SyncJob is enqueued for worker retry.
@@ -142,7 +146,10 @@ async function findPriorMoodleEventId(sessionId) {
   } catch { return null; }
 }
 
-/** Resolve the Moodle course for this class via CourseMapping (or null for site event). */
+/**
+ * Resolve the Moodle course for this class via CourseMapping (or null when the
+ * class has no course mapping).
+ */
 async function resolveMoodleCourseId(session) {
   try {
     const group = session?.classGroup && typeof session.classGroup === "object" ? session.classGroup : {};
@@ -155,6 +162,138 @@ async function resolveMoodleCourseId(session) {
     const first = (ids || []).find((n) => Number.isInteger(n) && n > 0);
     return first || null;
   } catch { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// Class-group scoping (isolation inside a shared Moodle course)
+// ---------------------------------------------------------------------------
+// Two StudiesMasters class groups (e.g. "JHS 1 Mathematics Class 1" and
+// "... Class 2") legitimately map to the SAME Moodle course. A plain COURSE
+// calendar event is visible to every enrolled member of that course, so pushing
+// one class as a course event published Class 2's schedule AND its Google Meet
+// link to Class 1's students (and vice versa) — a real cross-group leak.
+//
+// Every class is therefore scoped to a Moodle GROUP that mirrors the
+// StudiesMasters class group (idnumber sm-cg-<classGroupId>, stable and
+// idempotent). A course event carrying that groupid is a Moodle GROUP event: only
+// members of that group (+ teachers/managers) see it, so a shared course calendar
+// can never expose another class group's class or meeting link.
+const GROUP_ID_PREFIX = "sm-cg-";
+const groupScopeCache = new Map(); // `${classGroupId}|${courseId}` -> scope
+
+/**
+ * Find (or create) the Moodle group that mirrors one StudiesMasters class group
+ * inside `courseId`, and make sure every enrolled student with a Moodle account
+ * is a member. Returns null when the group cannot be resolved — callers MUST
+ * treat that as "do not publish" (fail closed) rather than falling back to an
+ * unscoped event.
+ */
+export async function ensureClassGroupMoodleGroup({ classGroupId, courseId } = {}) {
+  if (!classGroupId || !courseId) return null;
+  const cacheKey = `${String(classGroupId)}|${Number(courseId)}`;
+  const cached = groupScopeCache.get(cacheKey);
+  if (cached?.groupId) return cached;
+
+  const ClassGroup = (await import("../../models/ClassGroup.js")).default;
+  const group = await ClassGroup.findById(classGroupId).populate("students", "fullName email").lean();
+  if (!group) return null;
+
+  const idnumber = `${GROUP_ID_PREFIX}${String(classGroupId)}`;
+  const name = String(group.code || `SM ${group.subject || "Class"} ${group.grade || ""}`).trim().slice(0, 100) || idnumber;
+
+  let groupId = null;
+  let created = false;
+  try {
+    // NOTE: the calendar WS targets a group by groupid; group management itself
+    // uses the standard core_group_* functions.
+    const existing = await callWs("core_group_get_course_groups", { courseid: Number(courseId) });
+    const rows = Array.isArray(existing) ? existing : existing?.groups || [];
+    const match = rows.find((g) => String(g?.idnumber || "") === idnumber)
+      || rows.find((g) => String(g?.name || "").trim() === name);
+    if (match?.id) groupId = Number(match.id);
+  } catch (err) {
+    logger.warn(`[MOODLE] group lookup failed for class group ${classGroupId} in course ${courseId}: ${err?.message || err}`);
+  }
+
+  if (!groupId) {
+    try {
+      const res = await callWs("core_group_create_groups", {
+        "groups[0][courseid]": Number(courseId),
+        "groups[0][name]": name,
+        "groups[0][idnumber]": idnumber,
+        "groups[0][description]": `StudiesMasters class group ${group.code || classGroupId}`.slice(0, 255),
+      });
+      const made = Array.isArray(res) ? res[0] : res?.groups?.[0];
+      groupId = Number(made?.id) || null;
+      created = Boolean(groupId);
+      if (groupId) logger.info(`[MOODLE] created Moodle group ${groupId} ("${name}") in course ${courseId} for class group ${classGroupId}`);
+    } catch (err) {
+      logger.warn(`[MOODLE] group create failed for class group ${classGroupId} in course ${courseId}: ${err?.message || err}`);
+    }
+  }
+  if (!groupId) return null;
+
+  const scope = await syncGroupMembers({ groupId, group, idnumber, name, courseId, created });
+  groupScopeCache.set(cacheKey, scope);
+  logger.info(`[MOODLE] class-group scope ready: ${name} -> moodle group ${groupId} (course ${courseId}, ${scope.studentsWithMoodle} student(s))`);
+  return scope;
+}
+
+/**
+ * Add every class-group student that has a provisioned Moodle account to the
+ * mirror group. Best-effort: membership failures must never stop the class from
+ * being scoped (the event still reaches the group's existing members).
+ */
+async function syncGroupMembers({ groupId, group, idnumber, name, courseId, created }) {
+  const MoodleLink = (await import("../../models/MoodleLink.js")).default;
+  const studentIds = (group.students || []).map((s) => String(s?._id || s)).filter(Boolean);
+  let studentsWithMoodle = 0;
+  let membersAdded = 0;
+  try {
+    const links = studentIds.length
+      ? await MoodleLink.find({ role: "student", studentRef: { $in: studentIds }, moodleUserId: { $ne: null } })
+        .select("studentRef moodleUserId").lean()
+      : [];
+    const wanted = links.map((l) => Number(l.moodleUserId)).filter((n) => Number.isInteger(n) && n > 0);
+    studentsWithMoodle = wanted.length;
+
+    let existingMembers = null; // null = unknown -> attempt the batch add anyway
+    try {
+      const res = await callWs("core_group_get_group_members", { "groupids[0]": groupId });
+      const rows = Array.isArray(res) ? res : res?.groups?.[0]?.members || [];
+      existingMembers = new Set(rows.map((m) => String(m?.userid)));
+    } catch { /* listing not permitted -> try the add */ }
+
+    const toAdd = wanted.filter((uid) => existingMembers === null || !existingMembers.has(String(uid)));
+    if (toAdd.length) {
+      const params = {};
+      toAdd.forEach((uid, i) => {
+        params[`members[${i}][groupid]`] = groupId;
+        params[`members[${i}][userid]`] = uid;
+      });
+      try {
+        await callWs("core_group_add_group_members", params);
+        membersAdded = toAdd.length;
+      } catch {
+        // Moodle rejects the WHOLE batch when any member is already present, so
+        // retry one-by-one: one stale membership must not block the class.
+        for (const uid of toAdd) {
+          try {
+            await callWs("core_group_add_group_members", { "members[0][groupid]": groupId, "members[0][userid]": uid });
+            membersAdded += 1;
+          } catch { /* already a member, or not addable */ }
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn(`[MOODLE] group membership sync failed for class group ${group.code || group._id}: ${err?.message || err}`);
+  }
+  return { groupId, name, idnumber, courseId: Number(courseId), created, studentsWithMoodle, membersAdded };
+}
+
+/** Test/ops hook: drop the process-local scope cache (e.g. after group changes). */
+export function resetClassGroupScopeCache() {
+  groupScopeCache.clear();
 }
 
 /** Local "HH:MM" on a date -> epoch seconds in Africa/Accra (+00:00, no DST). */
@@ -237,6 +376,40 @@ async function pushClassToMoodle({ sessionId, action, session, payload, error })
   }
 
   const courseId = await resolveMoodleCourseId(session);
+
+  // ISOLATION GATE (fail closed).
+  // Nothing may reach Moodle unless it is scoped to the originating class group:
+  //  - no course mapping  -> a SITE event would be visible to every Moodle user;
+  //  - no group scope     -> a COURSE event would be visible to every enrolled
+  //                          member of a course shared with other class groups.
+  // In both cases the class is NOT published and a durable retry is queued, so
+  // the backend stays the single source of truth and no other class group can
+  // ever see this timetable, class or Google Meet link.
+  const classGroupRef = session?.classGroup?._id || session?.classGroup || null;
+  const scopeBlocked = (reason, message) => ({
+    synced: false, live: false, queued: true, reason, message, payload,
+  });
+  if (!courseId) {
+    await audit({
+      ...auditBase, action, outcome: "failure",
+      failure: { message: "no-course-mapping: refusing to publish a site-wide calendar event" },
+      detail: { ...payload, classGroupId: classGroupRef ? String(classGroupRef) : null },
+    }).catch(() => {});
+    await queueClassSyncRetry({ sessionId, action, payload, reason: "no-course-mapping" }).catch(() => {});
+    logger.warn(`[MOODLE] class ${sessionId} not published: no Moodle course mapping for its class group (a site event would leak it to every Moodle user)`);
+    return scopeBlocked("no-course-mapping", "No Moodle course mapping for this class group — not published to avoid exposing the class site-wide.");
+  }
+  const scope = await ensureClassGroupMoodleGroup({ classGroupId: classGroupRef, courseId });
+  if (!scope?.groupId) {
+    await audit({
+      ...auditBase, action, outcome: "failure",
+      failure: { message: "no-group-scope: refusing to publish a course-wide calendar event" },
+      detail: { ...payload, classGroupId: classGroupRef ? String(classGroupRef) : null, moodleCourseId: courseId },
+    }).catch(() => {});
+    await queueClassSyncRetry({ sessionId, action, payload, reason: "no-group-scope" }).catch(() => {});
+    logger.warn(`[MOODLE] class ${sessionId} not published: class-group scope unavailable in course ${courseId} (a course event would leak it to every enrolled member)`);
+    return scopeBlocked("no-group-scope", "Class-group isolation unavailable in Moodle — not published to avoid exposing this class to other groups.");
+  }
   const name = `${payload.subject || "Virtual Class"}${payload.grade ? ` — ${payload.grade}` : ""}${payload.teacher ? ` (${payload.teacher})` : ""}`.slice(0, 255);
   const timestart = toEpochSeconds(payload.date, payload.startTime);
   const timeduration = Math.max(0, (toEpochSeconds(payload.date, payload.endTime) - timestart) || 3600);
@@ -251,11 +424,15 @@ async function pushClassToMoodle({ sessionId, action, session, payload, error })
     // "uuid" key — unknown keys abort the whole call with
     // "Invalid parameter value detected: Unexpected keys (...) detected".
     "events[0][format]": 1, // 1 = HTML
-    "events[0][eventtype]": courseId ? "course" : "site",
+    // Always a COURSE event, always scoped to this class group's Moodle group:
+    // a group event is only shown to that group's members, which is what keeps
+    // two class groups sharing one Moodle course isolated from each other.
+    "events[0][eventtype]": "course",
+    "events[0][courseid]": courseId,
+    "events[0][groupid]": scope.groupId,
     "events[0][timestart]": timestart,
     "events[0][timeduration]": timeduration,
   };
-  if (courseId) baseParams["events[0][courseid]"] = courseId;
 
   // Update path: core_calendar_update_calendar_events is NOT registered on the
   // production Moodle (verified: dml_missing_record_exception on
@@ -276,14 +453,17 @@ async function pushClassToMoodle({ sessionId, action, session, payload, error })
     const res = await callWs("core_calendar_create_calendar_events", baseParams);
     const created = Array.isArray(res?.events) ? res.events[0] : res?.event || null;
     const moodleEventId = Number(created?.id || created?.eventid || res?.eventid || 0) || null;
-    await audit({ ...auditBase, action, outcome: "success", detail: { ...payload, moodleEventId, moodleCourseId: courseId } }).catch(() => {});
-    logger.info(`[MOODLE] LIVE class sync: ${action} ${sessionId} -> event ${moodleEventId || "?"}`);
-    return { synced: true, live: true, created: true, moodleEventId, moodleCourseId: courseId, payload };
+    await audit({
+      ...auditBase, action, outcome: "success",
+      detail: { ...payload, moodleEventId, moodleCourseId: courseId, moodleGroupId: scope.groupId },
+    }).catch(() => {});
+    logger.info(`[MOODLE] LIVE class sync: ${action} ${sessionId} -> event ${moodleEventId || "?"} (course ${courseId}, group ${scope.groupId})`);
+    return { synced: true, live: true, created: true, moodleEventId, moodleCourseId: courseId, moodleGroupId: scope.groupId, payload };
   } catch (wsErr) {
     await audit({
       ...auditBase, action, outcome: "failure",
       failure: { message: String(wsErr?.message || wsErr) },
-      detail: { ...payload, moodleCourseId: courseId },
+      detail: { ...payload, moodleCourseId: courseId, moodleGroupId: scope.groupId },
     }).catch(() => {});
     // Durable retry — the worker replays this later, scheduling is unaffected.
     await queueClassSyncRetry({ sessionId, action, payload, reason: wsErr?.message || "ws-fault" }).catch(() => {});
@@ -321,4 +501,4 @@ export async function replayQueuedClassSync({ sessionId, action }) {
   return res;
 }
 
-export default { syncClassSession, toMoodleDisplay, replayQueuedClassSync, CLASS_SYNC_ACTIONS };
+export default { syncClassSession, toMoodleDisplay, replayQueuedClassSync, ensureClassGroupMoodleGroup, resetClassGroupScopeCache, CLASS_SYNC_ACTIONS };
