@@ -24,7 +24,7 @@ export const sendCredentialsEmail = async ({
   const roleLabel = role === "tutor-manager" ? "Tutor Manager" : "Teacher";
   const dashboardLink = role === "tutor-manager"
     ? "https://studiesmasters-frontend.onrender.com/#/qao/access"
-    : "https://studiesmasters-frontend.onrender.com/#/teacher/dashboard";
+    : "https://studiesmasters-frontend.onrender.com/#/login";
 
   try {
     const { data, error } = await resend.emails.send({
