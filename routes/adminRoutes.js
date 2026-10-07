@@ -588,7 +588,8 @@ router.get("/users", adminAuth, async (req, res) => {
     const teachers = await Teacher.find()
       .select("_id fullName email status createdAt subjectsTeaching")
       .populate("subjectsTeaching", "name curriculum grade package");
-    const qaos = await QaoUser.find().select("_id fullName email status createdAt");
+    // QaoUser stores the display name in `name` (there is no fullName path).
+    const qaos = await QaoUser.find().select("_id name email createdAt");
     const admins = await Admin.find().select("_id fullName email createdAt");
 
     // Join every student's payments in one query so the Users list can show the
@@ -619,7 +620,7 @@ router.get("/users", adminAuth, async (req, res) => {
         }));
         return { ...u.toObject(), role: "teacher", name: u.fullName, subjects, subjectNames: subjects.map((s) => s.name).filter(Boolean) };
       }),
-      ...qaos.map(u => ({ ...u.toObject(), role: "qao", name: u.fullName })),
+      ...qaos.map(u => ({ ...u.toObject(), role: "qao", name: u.name || u.fullName || "Tutor Manager" })),
       ...admins.map(u => ({ ...u.toObject(), role: "admin", name: u.fullName, status: "active" })),
     ];
 
