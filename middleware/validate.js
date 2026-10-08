@@ -112,9 +112,10 @@ export const schemas = {
     plan: z.string().max(80).optional().default(""),
   }),
 
-  // Assign teacher to class group
+  // Assign teacher to class group. An empty string UNASSIGNS the teacher
+  // (the admin UI's "Assign a teacher" placeholder sends "").
   assignTeacher: z.object({
-    teacherId: z.string().min(1, "Teacher ID is required"),
+    teacherId: z.string(),
   }),
 
   // Add students to an existing class group

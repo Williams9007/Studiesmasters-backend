@@ -1062,7 +1062,17 @@ router.post("/class-groups/generate", adminAuth, validate(schemas.classGroupGene
 
 router.put("/class-groups/:id/teacher", adminAuth, validate(schemas.assignTeacher), async (req, res) => {
   try {
-    const teacher = await Teacher.findById(req.body.teacherId);
+    const teacherId = String(req.body.teacherId || "").trim();
+
+    // Empty teacherId = unassign: clear the teacher from the class group.
+    if (!teacherId) {
+      const unassigned = await ClassGroup.findByIdAndUpdate(req.params.id, { teacher: null }, { new: true }).populate("teacher", "fullName email");
+      if (!unassigned) return res.status(404).json({ message: "Class group not found." });
+      await logAudit({ admin: req.admin, action: "CLASS_GROUP_TEACHER_UNASSIGNED", resource: "ClassGroup", resourceId: unassigned._id.toString(), details: { code: unassigned.code }, req });
+      return res.json({ group: unassigned, moodle: null });
+    }
+
+    const teacher = await Teacher.findById(teacherId);
     if (!teacher) return res.status(404).json({ message: "Teacher not found." });
     const group = await ClassGroup.findByIdAndUpdate(req.params.id, { teacher: teacher._id }, { new: true }).populate("teacher", "fullName email");
     if (!group) return res.status(404).json({ message: "Class group not found." });
