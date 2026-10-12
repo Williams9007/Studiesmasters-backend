@@ -689,6 +689,12 @@ router.get("/admin/google-status", adminAuth, async (req, res) => {
     const GoogleToken = (await import("../models/GoogleToken.js")).default;
     const mask = (v) => (v ? `${String(v).slice(0, 6)}••••••${String(v).slice(-4)}` : "");
     const token = await GoogleToken.findOne({ provider: "google" }).sort({ updatedAt: -1 }).lean();
+    // LIVE health probe: a stored refresh token alone does not mean Google
+    // still honours it (grants die on revoke / 7-day Testing-mode expiry).
+    // Without this, admins saw "stored (encrypted)" while every link
+    // generation was failing with invalid_grant.
+    const { getAccessTokenStatus } = await import("../services/google/token.service.js");
+    const health = await getAccessTokenStatus({ email: token?.email || null });
     res.json({
       success: true,
       settings: {
@@ -700,6 +706,7 @@ router.get("/admin/google-status", adminAuth, async (req, res) => {
         timezone: config.timezone,
         oauthConfigured: isConfiguredReal(),
         tokenStatus: token ? { hasRefreshToken: Boolean(token.encryptedRefreshToken), expiresAt: token.expiresAt, scope: token.scope } : null,
+        tokenHealth: { ok: Boolean(health.token), error: health.error },
       },
     });
   } catch (err) {
@@ -715,13 +722,19 @@ router.post("/admin/google-status/test-connection", adminAuth, async (req, res) 
       subject: "Google Workspace connection test",
       date: new Date(), startTime: "00:00", endTime: "00:01", sessionId: "probe",
     });
+    // Distinguish the three real outcomes: live link, deliberate mock, FAILURE.
+    // Previously a failure (e.g. revoked refresh token) fell into the mock
+    // branch and the admin was told "Mock mode ..." instead of the real reason.
+    const failed = probe.meetingStatus !== "ready";
     res.json({
-      success: true,
-      mode: probe.mock ? "mock" : "live",
+      success: !failed,
+      mode: failed ? "failed" : probe.mock ? "mock" : "live",
       meetingStatus: probe.meetingStatus,
-      message: probe.mock
-        ? "Mock mode: configure real GOOGLE_CLIENT_* credentials and set GOOGLE_ALLOW_MOCK=false for live generation."
-        : "Live Google Calendar connection OK.",
+      message: failed
+        ? `Meet link generation FAILED: ${probe.note || "unknown Google error"}. If the reason is invalid_grant, reconnect the Google account (Reconnect Google button or GET /api/google/oauth/start), then run POST /api/admin/sessions/backfill-meetings.`
+        : probe.mock
+          ? "Mock mode: configure real GOOGLE_CLIENT_* credentials and set GOOGLE_ALLOW_MOCK=false for live generation."
+          : "Live Google Calendar connection OK.",
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

@@ -21,7 +21,7 @@ import { adminAuth } from "../middleware/adminAuth.js";
 import { logQaoAction } from "../services/qao/audit.service.js";
 import GoogleToken from "../models/GoogleToken.js";
 import { config, assertConfiguredReal } from "../services/google/config.js";
-import { beginAuthorization, exchangeCode, getAccessToken } from "../services/google/token.service.js";
+import { beginAuthorization, exchangeCode, getAccessToken, getAccessTokenStatus } from "../services/google/token.service.js";
 
 const router = Router();
 
@@ -91,9 +91,16 @@ router.get("/status", adminAuth, async (req, res) => {
     if (!row || !row.encryptedRefreshToken) {
       return res.json({ success: true, connected: false });
     }
+    // "connected" used to mean only "a row exists". A revoked/expired grant
+    // (invalid_grant) still has a row, so the UI showed a healthy connection
+    // while NO Meet links could be generated. Probe the grant live.
+    const { token, error } = await getAccessTokenStatus({ email: SERVICE_EMAIL });
     res.json({
       success: true,
       connected: true,
+      tokenValid: Boolean(token),
+      tokenError: token ? null : error,
+      reconnectUrl: token ? null : "/api/google/oauth/start",
       account: SERVICE_EMAIL,
       scopes: row.scope ? row.scope.split(" ") : [],
       expiresAt: row.expiresAt || null,

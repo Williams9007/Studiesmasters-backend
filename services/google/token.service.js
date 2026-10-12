@@ -104,8 +104,13 @@ async function refreshAccessToken(row, email) {
   }
 
   if (!res.ok) {
-    const err = new Error(`Google token refresh failed (${res.status})`);
+    // Keep Google's own reason (invalid_grant, invalid_client, ...) — without it
+    // a dead refresh grant looks like an opaque "400" and is undiagnosable.
+    const detail = await res.json().catch(() => ({}));
+    const reason = [detail.error, detail.error_description].filter(Boolean).join(": ");
+    const err = new Error(`Google token refresh failed (${res.status})${reason ? ` - ${reason}` : ""}`);
     err.code = "GOOGLE_TOKEN_REFRESH_FAILED";
+    err.reason = detail.error || null;
     throw err;
   }
   const data = await res.json().catch(() => ({}));
@@ -132,21 +137,41 @@ async function refreshAccessToken(row, email) {
  * no token is available (caller decides whether to fall back to mock).
  */
 export async function getAccessToken({ email = null } = {}) {
-  if (!isConfiguredReal()) return null;
+  const { token } = await getAccessTokenStatus({ email });
+  return token;
+}
 
-  const row = email
-    ? await GoogleToken.findOne({ provider: "google", email }).lean()
-    : await GoogleToken.findOne({ provider: "google" }).sort({ updatedAt: -1 }).lean();
-  if (!row) return null;
+/**
+ * Same as getAccessToken() but ALSO reports WHY a token could not be obtained.
+ *
+ * Motivation: a revoked/expired refresh grant (Google: invalid_grant) used to
+ * be swallowed by a silent `catch { return null; }`, so Google Meet links just
+ * silently stopped being generated while every status endpoint still claimed
+ * "connected". Status endpoints and logs now call this to surface the reason.
+ *
+ * @returns {Promise<{ token: string|null, error: string|null }>}
+ *   error is null on success, otherwise a short human-readable reason.
+ */
+export async function getAccessTokenStatus({ email = null } = {}) {
+  if (!isConfiguredReal()) return { token: null, error: "Google not configured (missing credentials/encryption key)" };
 
   try {
+    const row = email
+      ? await GoogleToken.findOne({ provider: "google", email }).lean()
+      : await GoogleToken.findOne({ provider: "google" }).sort({ updatedAt: -1 }).lean();
+    if (!row) return { token: null, error: "No Google token stored - account was never connected (or was disconnected)" };
+
     if (row.encryptedAccessToken && !hasExpired(row)) {
       const token = decryptValue(row.encryptedAccessToken);
-      if (token) return token;
+      if (token) return { token, error: null };
+      // Stored access token unreadable (encryption key rotated?) -> refresh below.
     }
-    return await refreshAccessToken(row, email || row.email);
-  } catch {
-    return null; // refresh failed -> caller falls back per GOOGLE_ALLOW_MOCK
+    const token = await refreshAccessToken(row, email || row.email);
+    return { token, error: null };
+  } catch (err) {
+    // Never throw: meeting creation degrades to meetingStatus="pending".
+    console.error(`[google/token] access token unavailable${email ? ` for ${email}` : ""}: ${err.message}`);
+    return { token: null, error: err.message };
   }
 }
 
@@ -230,4 +255,4 @@ export async function exchangeCode({ code, state, email = null }) {
   return { ok: true };
 }
 
-export default { getAccessToken, saveToken, beginAuthorization, exchangeCode };
+export default { getAccessToken, getAccessTokenStatus, saveToken, beginAuthorization, exchangeCode };

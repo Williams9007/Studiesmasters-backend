@@ -7,7 +7,7 @@
 // integration) — failures surface as meetingStatus="pending".
 import crypto from "crypto";
 import { config, isConfiguredReal } from "./config.js";
-import { getAccessToken } from "./token.service.js";
+import { getAccessTokenStatus } from "./token.service.js";
 
 // --- Mock helpers ----------------------------------------------------------
 // Google Meet codes look like "abc-defg-hijk". We generate a deterministic but
@@ -64,17 +64,25 @@ export async function createCalendarEvent({
 
   // 1) If real credentials + a token are not usable, fall back to mock when allowed.
   const realReady = isConfiguredReal();
-  const token = realReady ? await getAccessToken() : null;
-  if (!realReady || !token) {
+  const tokenStatus = realReady ? await getAccessTokenStatus() : { token: null, error: "Google not configured" };
+  if (!realReady || !tokenStatus.token) {
     if (config.allowMock) {
       const payload = makeMockPayload();
       payload.mock = true;
       return payload;
     }
-    const err = new Error("Google not configured and mock disabled (GOOGLE_ALLOW_MOCK=false)");
-    err.code = "GOOGLE_NOT_CONFIGURED";
+    // Carry the SPECIFIC reason (e.g. "Google token refresh failed (400) -
+    // invalid_grant: Token has been expired or revoked") up to the session's
+    // meetingStatus note / admin test endpoint instead of a generic message.
+    const err = new Error(
+      realReady
+        ? `No usable Google OAuth token: ${tokenStatus.error || "unknown"}. Reconnect via /api/google/oauth/start.`
+        : "Google not configured and mock disabled (GOOGLE_ALLOW_MOCK=false)"
+    );
+    err.code = realReady ? "GOOGLE_NO_TOKEN" : "GOOGLE_NOT_CONFIGURED";
     throw err;
   }
+  const token = tokenStatus.token;
 
   // 2) Real Google Calendar v3 call.
   const eventBody = {

@@ -1747,6 +1747,12 @@ router.post("/sessions/backfill-meetings", adminAuth, async (req, res) => {
       const row = await GoogleToken.findOne({ provider: "google", email: svcEmail }).lean();
       googleStatus.account = svcEmail;
       googleStatus.connected = Boolean(row?.encryptedRefreshToken);
+      // A stored grant can still be revoked/expired (invalid_grant) — probe it
+      // live so the admin is told to RECONNECT instead of seeing a dead end.
+      const { getAccessTokenStatus } = await import("../services/google/token.service.js");
+      const health = await getAccessTokenStatus({ email: svcEmail });
+      googleStatus.tokenValid = Boolean(health.token);
+      googleStatus.tokenError = health.error;
     } catch { /* status is informative only */ }
 
     const backfill = await scheduleSvc.backfillPendingMeetings({
@@ -1770,9 +1776,11 @@ router.post("/sessions/backfill-meetings", adminAuth, async (req, res) => {
 
     const message = backfill.ready > 0
       ? `${backfill.ready} Google Meet link(s) created and pushed to Moodle.`
-      : googleStatus.connected
-        ? "No classes were missing a Meet link."
-        : `No Meet links could be created — connect ${googleStatus.account || "the company Google account"} in Admin → Google first.`;
+      : googleStatus.connected && googleStatus.tokenValid === false
+        ? `Google is connected but the OAuth grant is no longer valid (${googleStatus.tokenError || "invalid_grant"}). Reconnect ${googleStatus.account} (Admin → Reconnect Google / GET /api/google/oauth/start), then run this repair again.`
+        : googleStatus.connected
+          ? "No classes were missing a Meet link."
+          : `No Meet links could be created — connect ${googleStatus.account || "the company Google account"} in Admin → Google first.`;
 
     res.json({ success: true, message, google: googleStatus, backfill, moodle });
   } catch (err) {

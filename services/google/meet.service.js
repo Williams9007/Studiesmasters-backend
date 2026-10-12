@@ -48,10 +48,15 @@ export async function createMeeting({
     conferenceId: "",
     calendarEventId: "",
     meetingStatus: "pending",
-    mock: true,
+    // Default true only until we know better: a disabled/failed attempt is NOT
+    // a mock. Returning mock:true here made the admin "Test connection" report
+    // "MOCK" while GOOGLE_ALLOW_MOCK=false and no link had been generated.
+    mock: false,
   };
 
-  if (!config.enabled) return { ...base, note: "Google integration disabled" };
+  if (!config.enabled) {
+    return { ...base, note: "Google integration disabled (GOOGLE_ENABLED=false)" };
+  }
 
   try {
     const startIso = combineDateTime(date, startTime);
