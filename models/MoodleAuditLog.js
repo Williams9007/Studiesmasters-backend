@@ -46,6 +46,11 @@ const moodleAuditSchema = new mongoose.Schema(
     runId: { type: String, default: null },
 
     outcome: { type: String, enum: ["success", "failure", "skipped"], default: "success" },
+    // WHY it failed. Previously this key was passed by callers but never
+    // declared on the schema, so mongoose silently stripped it and every
+    // failure row landed with no message (undiagnosable "failure" entries).
+    // Mixed because some callers pass a string and others { message }.
+    failure: { type: mongoose.Schema.Types.Mixed, default: null },
     detail: { type: mongoose.Schema.Types.Mixed, default: {} },
 
     // Login-time forensics.

@@ -34,6 +34,15 @@ import { callWs } from "./client.js";
 import { getCourseIdsFor } from "./courseMapper.js";
 import { enqueue } from "./queue.js";
 import logger from "../../utils/logger.js";
+// Register the models whose refs we populate below (ClassGroup.students ->
+// "Student", ClassGroup.teacher / ClassSession.teacher -> "Teacher"). In the
+// full server the route layer happens to register them first, but every
+// standalone entry point (worker, backfill/preflight scripts) hit
+// "Schema hasn't been registered for model \"Student\"" on
+// ClassGroup.findById(...).populate("students") because nothing in THIS module
+// chain imported them. Importing here makes the dependency explicit.
+import "../../models/Student.js";
+import "../../models/teacher.js";
 
 export const CLASS_SYNC_ACTIONS = {
   CREATED: "CLASS_CREATED",

@@ -23,10 +23,13 @@ export async function getCourseIdsFor({ subjects = [], curriculum = null, packag
 
   for (const subj of subjects) {
     const name = norm(subj?.name);
+    // Normalized target grade, hoisted so every candidate below reads the same
+    // value (an earlier edit referenced `targetGrade` before it was defined).
+    const targetGrade = norm(grade);
 
     // 1) Query CourseMapping, most specific first.
     const candidates = [
-      { subjectName: name, curriculum: norm(curriculum), packageName: norm(packageName), grade: norm(grade) },
+      { subjectName: name, curriculum: norm(curriculum), packageName: norm(packageName), grade: targetGrade },
       { subjectName: name, curriculum: norm(curriculum), packageName: norm(packageName), grade: null },
       { subjectName: name, curriculum: null, packageName: null, grade: null },
     ];
