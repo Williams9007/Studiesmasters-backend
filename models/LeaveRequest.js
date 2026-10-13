@@ -1,4 +1,4 @@
-﻿import mongoose from "mongoose";
+import mongoose from "mongoose";
 
 // Teacher leave requests. QAO reviews; teachers submit and can cancel their
 // own pending requests. Reviewer is always a Tutor Manager (QaoUser).

@@ -1,4 +1,4 @@
-﻿import mongoose from "mongoose";
+import mongoose from "mongoose";
 
 const broadcastSchema = new mongoose.Schema(
   {
@@ -64,4 +64,4 @@ const broadcastSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-export default mongoose.model("Broadcast", broadcastSchema);
+export default mongoose.models.Broadcast || mongoose.model("Broadcast", broadcastSchema);

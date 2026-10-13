@@ -1,4 +1,4 @@
-﻿import mongoose from "mongoose";
+import mongoose from "mongoose";
 
 // ClassSession is the operational source of truth for teaching activities.
 // It REFERENCEs ClassGroup and Teacher (no duplicated class data) so that

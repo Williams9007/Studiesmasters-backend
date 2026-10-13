@@ -1,4 +1,4 @@
-﻿// backend/routes/qaoRoutes.js
+// backend/routes/qaoRoutes.js
 import express from "express";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";

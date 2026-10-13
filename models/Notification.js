@@ -21,12 +21,12 @@ const notificationSchema = new mongoose.Schema({
   classGroupId: { type: mongoose.Schema.Types.ObjectId, ref: "ClassGroup", default: null },
   sessionId: { type: mongoose.Schema.Types.ObjectId, ref: "ClassSession", default: null },
   createdAt: { type: Date, default: Date.now },
-});
+}, { timestamps: true });
 
 // Optimized lookups: per-user unread, per-user recent history, per-role lists
 notificationSchema.index({ userId: 1, createdAt: -1 });
 notificationSchema.index({ userId: 1, read: 1, createdAt: -1 });
 notificationSchema.index({ role: 1, createdAt: -1 });
 
-const Notification = mongoose.model("Notification", notificationSchema);
+const Notification = mongoose.models.Notification || mongoose.model("Notification", notificationSchema);
 export default Notification;

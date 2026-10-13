@@ -1,4 +1,4 @@
-﻿// src/routes/classGroupRoutes.js
+// src/routes/classGroupRoutes.js
 import { Router } from "express";
 import { adminAuth } from "../middleware/adminAuth.js";
 import {

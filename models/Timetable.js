@@ -8,6 +8,6 @@ const timetableSchema = new mongoose.Schema({
   status: { type: String, enum: ["Pending", "Approved", "Flagged"], default: "Pending" },
   feedback: String,
   uploadedAt: { type: Date, default: Date.now },
-});
+}, { timestamps: true });
 
-export default mongoose.model("Timetable", timetableSchema);
+export default mongoose.models.Timetable || mongoose.model("Timetable", timetableSchema);

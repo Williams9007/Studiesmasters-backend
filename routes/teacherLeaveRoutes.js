@@ -1,4 +1,4 @@
-﻿// routes/teacherLeaveRoutes.js
+// routes/teacherLeaveRoutes.js
 // Teacher self-service leave requests: submit, view own status, cancel own
 // pending requests. Reviewed by Tutor Managers via /api/qao/leave-requests.
 import { Router } from "express";

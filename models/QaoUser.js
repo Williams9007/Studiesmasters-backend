@@ -24,6 +24,6 @@ const QaoUserSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const QaoUser = mongoose.model("QaoUser", QaoUserSchema);
+const QaoUser = mongoose.models.QaoUser || mongoose.model("QaoUser", QaoUserSchema);
 
 export default QaoUser;

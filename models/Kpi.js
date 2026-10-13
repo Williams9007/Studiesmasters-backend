@@ -10,4 +10,4 @@ const kpiSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-export default mongoose.model("Kpi", kpiSchema);
+export default mongoose.models.Kpi || mongoose.model("Kpi", kpiSchema);

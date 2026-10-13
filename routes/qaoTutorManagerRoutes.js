@@ -1,4 +1,4 @@
-﻿// routes/qaoTutorManagerRoutes.js
+// routes/qaoTutorManagerRoutes.js
 //
 // Tutor Manager (QAO) dashboard endpoints. Mounted from qaoRoutes.js so every
 // path below lives under /api/qao/*. All routes are verifyQao-gated and every

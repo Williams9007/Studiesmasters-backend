@@ -1,4 +1,4 @@
-﻿import mongoose from "mongoose";
+import mongoose from "mongoose";
 
 // A teaching group is intentionally separate from payment enrolments: it is
 // the small, named classroom an admin assigns to one teacher.

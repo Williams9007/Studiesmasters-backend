@@ -1,6 +1,6 @@
 import express from "express";
 import ClassEnrollment from "../models/ClassEnrollment.js";
-import User from "../models/Users.js";
+import Class from "../models/Class.js";
 
 const router = express.Router();
 
@@ -119,13 +119,13 @@ router.delete("/:id", async (req, res) => {
   }
 });
 
-// ✅ Get all classes for a specific student
-router.get("/student/:id", async (req, res) => {
+// ✅ Get all classes (Class collection) for a specific student
+router.get("/student/:id/classes", async (req, res) => {
   try {
     const { id } = req.params;
-    const classes = await Class.find({ studentsEnrolled: id })
-      .populate("subject")
-      .populate("teacher", "name email");
+    const classes = await Class.find({ students: id })
+      .populate("teacher", "fullName email")
+      .lean();
 
     if (!classes.length) {
       return res.status(404).json({ message: "No classes found for this student" });

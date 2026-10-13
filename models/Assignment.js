@@ -27,4 +27,4 @@ const assignmentSchema = new mongoose.Schema({
   timestamps: true // adds createdAt and updatedAt
 });
 
-export default mongoose.model("Assignment", assignmentSchema);
+export default mongoose.models.Assignment || mongoose.model("Assignment", assignmentSchema);

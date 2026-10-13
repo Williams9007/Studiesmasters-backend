@@ -1,6 +1,5 @@
 import Class from "../models/Class.js";
 import Teacher from "../models/teacher.js";
-import User from "../models/User.js";
 
 // ✅ Create a new class
 export const createClass = async (req, res) => {
@@ -34,8 +33,8 @@ export const createClass = async (req, res) => {
 export const getAllClasses = async (req, res) => {
   try {
     const classes = await Class.find()
-      .populate("teachers", "name email")
-      .populate("students", "name email");
+      .populate("teacher", "fullName email")
+      .populate("students", "fullName email");
     res.status(200).json(classes);
   } catch (error) {
     res.status(500).json({ message: "Error fetching classes", error });

@@ -1,4 +1,4 @@
-﻿// ==========================
+// ==========================
 // ENV MUST LOAD FIRST
 // ==========================
 import dotenv from "dotenv";
@@ -65,6 +65,8 @@ import qaoRoutes, { setQaoSocket } from "./routes/qaoRoutes.js";
 import teacherLeaveRoutes from "./routes/teacherLeaveRoutes.js";
 import teacherRoutes from "./routes/teacherRoutes.js";
 import classGroupRoutes from "./routes/classGroupRoutes.js";
+import classRoutes from "./routes/classRoutes.js";
+import { createClass, getAllClasses, addStudentToClass } from "./Controllers/classController.js";
 import authRoutes from "./routes/authRoutes.js";
 import resourceRoutes from "./routes/resourceRoutes.js";
 import messageRoutes from "./routes/messageRoutes.js";
@@ -256,6 +258,13 @@ app.use("/api/subjects", subjectRoutes);
 app.use("/api/qao", qaoRoutes);
 app.use("/api/teachers/leave-requests", teacherLeaveRoutes);
 app.use("/api/class-groups", classGroupRoutes);
+// Payment enrollments live under /api/enrollments (their own router: this
+// file must NOT collide with the /api/classes Class endpoints below).
+app.use("/api/enrollments", classRoutes);
+// Class collection endpoints (used by admin-create-class.jsx).
+app.get("/api/classes", getAllClasses);
+app.post("/api/classes/create", createClass);
+app.post("/api/classes/add-student", addStudentToClass);
 app.use("/api/resources", resourceRoutes);
 app.use("/api/messages", messageRoutes);
 app.use("/api/admin/broadcasts", broadcastRoutes);

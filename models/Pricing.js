@@ -6,12 +6,12 @@ const subjectSchema = mongoose.Schema({
 });
 
 const pricingSchema = mongoose.Schema({
-  curriculum: { type: String, required: true },
-  packageCode: { type: String, required: true },
-  grade: { type: String, required: true },
+  curriculum: { type: String, required: true, trim: true },
+  packageCode: { type: String, required: true, trim: true },
+  grade: { type: String, required: true, trim: true },
   subjects: [subjectSchema],
-});
+}, { timestamps: true });
 
-const Pricing = mongoose.model("Pricing", pricingSchema);
+const Pricing = mongoose.models.Pricing || mongoose.model("Pricing", pricingSchema);
 
 export default Pricing;

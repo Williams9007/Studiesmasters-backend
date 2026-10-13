@@ -15,4 +15,4 @@ const resourceSchema = new mongoose.Schema({
   reviewedAt: { type: Date },
 }, { timestamps: true });
 
-export default mongoose.model("Resource", resourceSchema);
+export default mongoose.models.Resource || mongoose.model("Resource", resourceSchema);

@@ -10,6 +10,6 @@ const lessonSchema = new mongoose.Schema({
   uploadedAt: { type: Date, default: Date.now },
   reviewedByQAO: { type: Boolean, default: false },
   qaoFeedback: String,
-});
+}, { timestamps: true });
 
-export default mongoose.model("Lesson", lessonSchema);
+export default mongoose.models.Lesson || mongoose.model("Lesson", lessonSchema);
