@@ -256,7 +256,8 @@ export const client = {
     // previously caused duplicate-category errors on re-provisioning.
     const list = await callWs("core_course_get_categories", {});
     const wanted = new Set(idnumbers || []);
-    return (list || []).filter((c) => wanted.has(c.idnumber));
+    // In dry-run callWs returns a stub object (not an array) — treat as empty.
+    return (Array.isArray(list) ? list : []).filter((c) => wanted.has(c.idnumber));
   },
   createCategories(categories) {
     const p = {};
@@ -273,7 +274,8 @@ export const client = {
     // on idnumber (Moodle's WS cannot filter courses by idnumber directly).
     const list = await callWs("core_course_get_courses", {});
     const wanted = new Set(idnumbers || []);
-    return (list || []).filter((c) => wanted.has(c.idnumber));
+    // In dry-run callWs returns a stub object (not an array) — treat as empty.
+    return (Array.isArray(list) ? list : []).filter((c) => wanted.has(c.idnumber));
   },
   createCourses(courses) {
     const p = {};

@@ -62,7 +62,11 @@ report.ready = !config.dryRun && config.wsEnabled
   && Object.values(report.probes).every((probe) => probe.ok);
 
 // Plain-language verdict so the operator knows the exact next action.
-if (!report.ready) {
+if (config.dryRun) {
+  // Nothing was actually sent to Moodle, so probe results say nothing about the
+  // live token. Say so explicitly instead of implying a failure.
+  report.verdict = "Dry-run mode: probes were SIMULATED, not sent to Moodle. This run proves no crash in the pipeline — it does NOT verify the live token. Set MOODLE_DRY_RUN=false + MOODLE_WS_TOKEN, then re-run to prove token/function permissions.";
+} else if (!report.ready) {
   const cats = new Set(Object.values(report.probes).filter((p) => !p.ok).map((p) => p.category));
   if (cats.has("INVALID_TOKEN")) {
     report.verdict = "The Moodle WS token is REJECTED (Invalid token). Regenerate it in Moodle → Site administration → Plugins → Web services → Manage tokens, then update MOODLE_WS_TOKEN in .env (and on Render).";
