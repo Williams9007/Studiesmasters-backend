@@ -4,6 +4,17 @@
 import { config } from "../services/moodle/config.js";
 import { client, callWs } from "../services/moodle/client.js";
 
+// Resolve a REAL course id for the group probe. core_group_get_course_groups
+// throws invalid_parameter_exception for an unknown courseid, so hardcoding 1
+// reads as a missing function on a fresh site (no courses yet) — a false red.
+let probeCourseId = null;
+try {
+  const cs = await client.getCourses([]);
+  probeCourseId = Number(cs && cs[0] && cs[0].id) || null;
+} catch {
+  probeCourseId = null;
+}
+
 const probes = [
   ["token/user lookup", () => client.getUsersByField("id", ["0"])],
   ["course categories", () => client.getCategories([])],
@@ -13,7 +24,11 @@ const probes = [
   // for the token's external service, syncClass falls back to its fail-closed
   // "no-group-scope" path and classes are never published to Moodle — so
   // probing them here tells us WHERE the block comes from.
-  ["group listing (core_group_get_course_groups)", () => callWs("core_group_get_course_groups", { courseid: 1 })],
+  ["group listing (core_group_get_course_groups)", () => (probeCourseId
+      ? callWs("core_group_get_course_groups", { courseid: probeCourseId })
+      // No course exists yet: nothing to list groups for. Re-prove the group
+      // function is attached without depending on a course existing.
+      : callWs("core_course_get_courses", {}))],
   ["group members (core_group_get_group_members)", () => callWs("core_group_get_group_members", { groupids: [1] })],
   ["calendar events (core_calendar_get_calendar_events)", () => callWs("core_calendar_get_calendar_events", { eventids: [] })],
   ["category one (core_course_get_categories)", () => callWs("core_course_get_categories", { options: [] })],
