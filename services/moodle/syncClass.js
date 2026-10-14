@@ -285,8 +285,16 @@ async function syncGroupMembers({ groupId, group, idnumber, name, courseId, crea
     let existingMembers = null; // null = unknown -> attempt the batch add anyway
     try {
       const res = await callWs("core_group_get_group_members", { "groupids[0]": groupId });
-      const rows = Array.isArray(res) ? res : res?.groups?.[0]?.members || [];
-      existingMembers = new Set(rows.map((m) => String(m?.userid)));
+      // Moodle returns [{ groupid, userids: [id, ...] }] for this function. Older
+      // or alternate shapes nest members under .groups[].members with a per-member
+      // id/userid — handle both so dedup actually works.
+      const rows = Array.isArray(res) ? res : res?.groups || [];
+      const ids = [];
+      for (const row of rows) {
+        if (Array.isArray(row?.userids)) ids.push(...row.userids);
+        else if (Array.isArray(row?.members)) ids.push(...row.members.map((m) => m?.id ?? m?.userid));
+      }
+      existingMembers = new Set(ids.map((n) => String(n)).filter((n) => n && n !== "undefined"));
     } catch { /* listing not permitted -> try the add */ }
 
     const toAdd = wanted.filter((uid) => existingMembers === null || !existingMembers.has(String(uid)));
