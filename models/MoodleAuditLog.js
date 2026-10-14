@@ -45,6 +45,9 @@ const moodleAuditSchema = new mongoose.Schema(
         "TIMETABLE_SYNC",
         "CLASS_ACCESS_DENIED",
         "CLASS_ACCESS_HEALED",
+        // Emitted when a student/teacher is placed into their class-group's
+        // Moodle group at enrollment time (class-group isolation).
+        "CLASS_GROUP_SCOPED",
       ],
       required: true,
       index: true,

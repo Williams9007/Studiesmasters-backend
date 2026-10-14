@@ -321,6 +321,82 @@ export function resetClassGroupScopeCache() {
   groupScopeCache.clear();
 }
 
+/**
+ * Resolve the Moodle course a single ClassGroup maps to (curriculum|grade|
+ * subject via CourseMapping), or null. Shared by the class-group scoping
+ * helpers below and by resolveMoodleCourseId.
+ */
+async function courseIdForClassGroup(group) {
+  try {
+    const ids = await getCourseIdsFor({
+      subjects: group?.subject ? [{ name: group.subject }] : [],
+      curriculum: group?.curriculum || null,
+      packageName: null,
+      grade: group?.grade || null,
+    });
+    const first = (ids || []).find((n) => Number.isInteger(n) && n > 0);
+    return first || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Place a freshly-enrolled student into the Moodle group of EVERY class group
+ * they belong to. This is what makes SEPARATE_GROUPS isolation real at
+ * enrollment time instead of only after a timetable/class-session sync: two
+ * students enrolled in the same shared course (e.g. "JHS 1 Mathematics") but
+ * in different class groups land in different Moodle groups and therefore
+ * cannot see each other.
+ *
+ * Best-effort by design: a scoping failure must never fail the enrollment, so
+ * this never throws and never blocks the caller.
+ */
+export async function scopeStudentToClassGroups({ studentId, curriculum = null, grade = null } = {}) {
+  if (!studentId) return { scoped: 0, groups: [] };
+  const ClassGroup = (await import("../../models/ClassGroup.js")).default;
+  // Match every class group that contains this student. Grade/curriculum are
+  // intentionally NOT used as query filters: each group's course is resolved
+  // (and validated) via getCourseIdsFor below, so a slightly different grade
+  // string can never wrongly drop a group the student actually belongs to.
+  const groups = await ClassGroup.find({ students: studentId }).lean();
+  const results = [];
+  for (const g of groups) {
+    const courseId = await courseIdForClassGroup(g);
+    if (!courseId) continue; // no mapped course for this group -> nothing to scope
+    const scope = await ensureClassGroupMoodleGroup({ classGroupId: String(g._id), courseId });
+    if (scope?.groupId) results.push({ classGroupId: String(g._id), courseId: Number(courseId), groupId: scope.groupId });
+  }
+  if (results.length) {
+    logger.info(`[MOODLE] student ${studentId} scoped into ${results.length} class-group Moodle group(s)`);
+  }
+  return { scoped: results.length, groups: results };
+}
+
+/**
+ * Add a teacher to the Moodle group of every class group they teach, so that
+ * under SEPARATE_GROUPS mode the teacher keeps seeing their own students even
+ * without the moodle/site:accessallgroups capability. ensureClassGroupMoodleGroup
+ * resolves group.teacher and adds them; we just drive it for the teacher's
+ * groups. Best-effort — never throws.
+ */
+export async function scopeTeacherToClassGroups({ teacherId } = {}) {
+  if (!teacherId) return { scoped: 0, groups: [] };
+  const ClassGroup = (await import("../../models/ClassGroup.js")).default;
+  const groups = await ClassGroup.find({ teacher: teacherId }).lean();
+  const results = [];
+  for (const g of groups) {
+    const courseId = await courseIdForClassGroup(g);
+    if (!courseId) continue;
+    const scope = await ensureClassGroupMoodleGroup({ classGroupId: String(g._id), courseId });
+    if (scope?.groupId) results.push({ classGroupId: String(g._id), courseId: Number(courseId), groupId: scope.groupId });
+  }
+  if (results.length) {
+    logger.info(`[MOODLE] teacher ${teacherId} scoped into ${results.length} class-group Moodle group(s)`);
+  }
+  return { scoped: results.length, groups: results };
+}
+
 /** Local "HH:MM" on a date -> epoch seconds in Africa/Accra (+00:00, no DST). */
 function toEpochSeconds(dateLike, hhmm) {
   const d = dateLike ? new Date(dateLike) : new Date();

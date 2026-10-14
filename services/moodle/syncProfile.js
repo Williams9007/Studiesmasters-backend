@@ -132,6 +132,20 @@ export async function syncProfile({ id, role = "student", req = null, enroll = t
 
     await audit({ action: "SYNC_COMPLETED", teacherRef: id, outcome: "success",
       detail: { coursesAssigned: desired.length, removed: obsolete.length } }).catch(() => {});
+
+    // Class-group isolation: place the teacher into the Moodle group of every
+    // class group they teach, so under SEPARATE_GROUPS the teacher keeps seeing
+    // their own students. Best-effort — never blocks enrollment.
+    try {
+      const { scopeTeacherToClassGroups } = await import("./syncClass.js");
+      const scoped = await scopeTeacherToClassGroups({ teacherId: id });
+      if (scoped?.scoped) {
+        await audit({ action: "CLASS_GROUP_SCOPED", teacherRef: id, outcome: "success",
+          detail: { groups: scoped.scoped } }).catch(() => {});
+      }
+    } catch (err) {
+      logger.warn(`[MOODLE] class-group scoping skipped for teacher ${id}: ${err?.message || err}`);
+    }
     return { ok: true, role, desired, removed: obsolete };
   }
 
@@ -218,6 +232,21 @@ export async function syncEnrollments({ student, req = null, runId: rid = null }
     await unenrollUser({ role: "student", id, courseIds: obsolete, req });
     await audit({ action: "ENROLLMENT_REMOVED", studentRef: id, runId: rid,
       detail: { courseIds: obsolete, reason: "no longer desired after access resolution" } }).catch(() => {});
+  }
+
+  // Class-group isolation: now that enrollment is aligned, place the student
+  // into the Moodle group of every class group they belong to. Under
+  // SEPARATE_GROUPS this is what stops two students in different class groups
+  // (same shared course) from seeing each other. Best-effort — never blocks.
+  try {
+    const { scopeStudentToClassGroups } = await import("./syncClass.js");
+    const scoped = await scopeStudentToClassGroups({ studentId: id, curriculum: access.curriculum, grade: access.grade });
+    if (scoped?.scoped) {
+      await audit({ action: "CLASS_GROUP_SCOPED", studentRef: id, runId: rid, outcome: "success",
+        detail: { groups: scoped.scoped } }).catch(() => {});
+    }
+  } catch (err) {
+    logger.warn(`[MOODLE] class-group scoping skipped for student ${id}: ${err?.message || err}`);
   }
 
   return { ok: true, desired, removed: obsolete, warnings, access: { packageId: access.packageId, subjectSource: access.subjectSource } };
