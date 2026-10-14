@@ -118,8 +118,20 @@ for (const [name, run] of probes) {
   }
 }
 
+// Readiness = token authenticates AND every required function is attached AND
+// reachable. A probe that reaches Moodle's parameter-validation or data-lookup
+// stage has ALREADY passed auth + attachment (Moodle rejects unknown functions
+// with an access-control error before it ever validates params or queries the
+// DB). So PROBE_PARAM_BUG and PROBE_NO_DATA are PASSES for readiness purposes
+// (they prove attachment) even though their `ok` is false — the group-members
+// probe legitimately has no group to look up until the first class sync creates
+// one. Only a genuine auth failure, a missing function, or an unexpected read
+// error should fail the gate.
+const BENIGN_CATEGORIES = new Set(["PROBE_PARAM_BUG", "PROBE_NO_DATA"]);
 report.ready = !config.dryRun && config.wsEnabled
-  && Object.values(report.probes).every((probe) => probe.ok);
+  && Object.values(report.probes).every(
+    (probe) => probe.ok || BENIGN_CATEGORIES.has(probe.category),
+  );
 
 // Plain-language verdict so the operator knows the exact next action.
 if (config.dryRun) {
