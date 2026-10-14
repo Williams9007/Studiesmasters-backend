@@ -443,10 +443,18 @@ async function pushClassToMoodle({ sessionId, action, session, payload, error })
     "events[0][timeduration]": timeduration,
   };
 
-  // Update path: core_calendar_update_calendar_events is NOT registered on the
-  // production Moodle (verified: dml_missing_record_exception on
-  // {external_functions}), so an update is emulated with delete + create.
+  // Update path. `core_calendar_update_calendar_events` is deliberately NOT used:
+  // it is not attached to the production Moodle web service, so calling it would
+  // fault with dml_missing_record_exception on {external_functions}. Updates are
+  // therefore emulated with delete + create, which is safe and idempotent.
   // Delete requires events[0][repeat] on this Moodle or it is rejected.
+  //
+  // NOTE (maintenance): the deployed Moodle site currently DOES list
+  // core_calendar_update_calendar_events among the external service functions
+  // (confirmed 2026-10 against service id 3), which contradicts the "not
+  // attached" claim above. The emulation is kept because it is proven on
+  // production; switching to the native update call is a separate, non-urgent
+  // change and must not ride along with the initial Moodle integration.
   if (priorEventId && action !== CLASS_SYNC_ACTIONS.CREATED) {
     try {
       await callWs("core_calendar_delete_calendar_events", { "events[0][eventid]": priorEventId, "events[0][repeat]": 0 });
