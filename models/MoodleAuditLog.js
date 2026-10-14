@@ -37,6 +37,14 @@ const moodleAuditSchema = new mongoose.Schema(
         "CLASS_MEETING_READY",
         "CLASS_CANCELLED",
         "GROUP_ENROLL_SYNC",
+        // Values emitted by the moodle audit() writer that were missing from
+        // this enum, so MoodleAuditLog.create() threw a ValidationError on
+        // every provisioning / timetable / class-access action (the audit row
+        // failed silently while the underlying sync succeeded).
+        "PROVISION_STRUCTURE",
+        "TIMETABLE_SYNC",
+        "CLASS_ACCESS_DENIED",
+        "CLASS_ACCESS_HEALED",
       ],
       required: true,
       index: true,
