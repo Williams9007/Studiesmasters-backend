@@ -286,8 +286,27 @@ export const client = {
       p[`courses[${i}][idnumber]`] = c.idnumber;
       p[`courses[${i}][format]`] = c.format || "topics";
       p[`courses[${i}][visible]`] = 1;
+      // Separate-groups mode so each StudiesMasters class group (a Moodle group
+      // inside this shared course) only ever sees its own members. Without this
+      // the course defaults to "No groups" and every enrolled student sees every
+      // other participant — the class-group isolation leak. groupmodeforce=1
+      // stops a member from switching the course back to "No groups".
+      p[`courses[${i}][groupmode]`] = 1; // 1 = SEPARATE_GROUPS (0 = no groups)
+      p[`courses[${i}][groupmodeforce]`] = 1;
     });
     return callWs("core_course_create_courses", p);
+  },
+  // Retro-fit separate-groups mode onto courses created before groupmode was
+  // set. Each entry: { id, groupmode?, groupmodeforce? }. Idempotent: only send
+  // courses whose mode actually needs to change.
+  updateCourses(courses) {
+    const p = {};
+    (courses || []).forEach((c, i) => {
+      p[`courses[${i}][id]`] = c.id;
+      if (c.groupmode != null) p[`courses[${i}][groupmode]`] = c.groupmode;
+      if (c.groupmodeforce != null) p[`courses[${i}][groupmodeforce]`] = c.groupmodeforce;
+    });
+    return callWs("core_course_update_courses", p);
   },
 };
 

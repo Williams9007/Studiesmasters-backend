@@ -258,6 +258,7 @@ async function syncGroupMembers({ groupId, group, idnumber, name, courseId, crea
   const studentIds = (group.students || []).map((s) => String(s?._id || s)).filter(Boolean);
   let studentsWithMoodle = 0;
   let membersAdded = 0;
+  let teacherWithMoodle = false;
   try {
     const links = studentIds.length
       ? await MoodleLink.find({ role: "student", studentRef: { $in: studentIds }, moodleUserId: { $ne: null } })
@@ -265,6 +266,21 @@ async function syncGroupMembers({ groupId, group, idnumber, name, courseId, crea
       : [];
     const wanted = links.map((l) => Number(l.moodleUserId)).filter((n) => Number.isInteger(n) && n > 0);
     studentsWithMoodle = wanted.length;
+
+    // In SEPARATE_GROUPS mode a member only ever sees their own group, so the
+    // group's TEACHER must also be a group member — otherwise the teacher (who
+    // sits in no group and may lack moodle/site:accessallgroups) would see none
+    // of their own students. Resolve the teacher's Moodle account and add them.
+    const teacherRef = group.teacher ? String(group.teacher?._id || group.teacher) : null;
+    if (teacherRef) {
+      const teacherLink = await MoodleLink.findOne({ role: "teacher", teacherRef, moodleUserId: { $ne: null } })
+        .select("moodleUserId").lean();
+      const teacherUid = Number(teacherLink?.moodleUserId);
+      if (Number.isInteger(teacherUid) && teacherUid > 0 && !wanted.includes(teacherUid)) {
+        wanted.push(teacherUid);
+        teacherWithMoodle = true;
+      }
+    }
 
     let existingMembers = null; // null = unknown -> attempt the batch add anyway
     try {
@@ -297,7 +313,7 @@ async function syncGroupMembers({ groupId, group, idnumber, name, courseId, crea
   } catch (err) {
     logger.warn(`[MOODLE] group membership sync failed for class group ${group.code || group._id}: ${err?.message || err}`);
   }
-  return { groupId, name, idnumber, courseId: Number(courseId), created, studentsWithMoodle, membersAdded };
+  return { groupId, name, idnumber, courseId: Number(courseId), created, studentsWithMoodle, teacherWithMoodle, membersAdded };
 }
 
 /** Test/ops hook: drop the process-local scope cache (e.g. after group changes). */
